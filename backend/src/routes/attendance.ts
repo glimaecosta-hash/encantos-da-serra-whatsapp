@@ -7,7 +7,7 @@ import type { AppEnv } from "../lib/types";
 import { validate } from "../lib/validate";
 import { transportName } from "../lib/whatsapp";
 import {
-  addNote, agentReply, assume, getConversation, handleInbound, listConversations, markRead, orderFromConversation,
+  addNote, agentReply, approvePending, assume, attendanceSettings, botMode, discardPending, getConversation, rateMessage, reviewConversation, setSupervised, handleInbound, listConversations, markRead, orderFromConversation,
   releaseToBot, setStage, simulatorContacts, simulatorThread, STAGES, updateContact, whatsappSettings,
 } from "../repos/conversations";
 
@@ -38,10 +38,14 @@ export const attendanceRoutes = new Hono<AppEnv>()
 
   .get("/", validate("query", z.object({ view: z.string().default("open"), q: z.string().optional() })), async (c) => {
     const { view, q } = c.req.valid("query");
-    return c.json({ ...(await listConversations({ view, q, userId: currentUser(c).id })), transport: transportName() });
+    return c.json({ ...(await listConversations({ view, q, userId: currentUser(c).id })), transport: transportName(), bot: botMode(), ...(await attendanceSettings()) });
   })
 
-  .get("/settings", async (c) => c.json({ settings: await whatsappSettings(), transport: transportName() }))
+  .get("/settings", async (c) => c.json({ settings: await whatsappSettings(), transport: transportName(), bot: botMode(), ...(await attendanceSettings()) }))
+
+  // Modo supervisionado: respostas do robô esperam aprovação da equipe.
+  .put("/supervision", validate("json", z.object({ supervised: z.boolean() })), async (c) =>
+    c.json(await setSupervised(c.req.valid("json").supervised)))
 
   .put("/settings", validate("json", settingsSchema), async (c) => {
     const value = JSON.stringify(c.req.valid("json"));
@@ -59,7 +63,7 @@ export const attendanceRoutes = new Hono<AppEnv>()
 
   .post(
     "/simulator/messages",
-    validate("json", z.object({ phone: z.string().min(8), name: z.string().trim().max(80).optional(), text: z.string().trim().min(1).max(2000) })),
+    validate("json", z.object({ phone: z.string().min(8), name: z.string().trim().max(80).optional(), text: z.string().trim().min(1).max(2000), useDraft: z.boolean().optional() })),
     async (c) => {
       const b = c.req.valid("json");
       const result = await handleInbound(b);
@@ -95,6 +99,33 @@ export const attendanceRoutes = new Hono<AppEnv>()
   .post("/:id/release", async (c) => {
     const id = idParam(c.req.param("id"));
     await releaseToBot(id, currentUser(c));
+    return c.json(await getConversation(id));
+  })
+
+  .post("/:id/pending/approve", validate("json", z.object({ messageId: z.number().int().positive().optional(), body: z.string().trim().min(1).max(2000).optional() })), async (c) => {
+    const id = idParam(c.req.param("id"));
+    const b = c.req.valid("json");
+    await approvePending(id, currentUser(c), b.messageId, b.body);
+    return c.json(await getConversation(id));
+  })
+
+  .post("/:id/pending/discard", validate("json", z.object({ messageId: z.number().int().positive().optional() })), async (c) => {
+    const id = idParam(c.req.param("id"));
+    await discardPending(id, currentUser(c), c.req.valid("json").messageId);
+    return c.json(await getConversation(id));
+  })
+
+  .post("/:id/messages/:messageId/rating", validate("json", z.object({ rating: z.enum(["good", "bad"]).nullable(), note: z.string().trim().max(500).optional() })), async (c) => {
+    const id = idParam(c.req.param("id"));
+    const b = c.req.valid("json");
+    await rateMessage(id, idParam(c.req.param("messageId")), currentUser(c), b.rating, b.note);
+    return c.json(await getConversation(id));
+  })
+
+  .patch("/:id/review", validate("json", z.object({ review: z.enum(["ok", "corrigida", "problema"]).nullable(), note: z.string().trim().max(500).optional() })), async (c) => {
+    const id = idParam(c.req.param("id"));
+    const b = c.req.valid("json");
+    await reviewConversation(id, currentUser(c), b.review, b.note);
     return c.json(await getConversation(id));
   })
 

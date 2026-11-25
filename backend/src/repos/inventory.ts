@@ -105,7 +105,7 @@ export async function productBatches(productId: number) {
 export async function transitionOrder(
   code: string,
   to: string,
-  opts: { message: string; temperatureC?: number; userId: number; force?: boolean },
+  opts: { message: string; temperatureC?: number; userId: number | null; force?: boolean }, // null = automático (pagamentos)
 ) {
   // Expedir fora da fila tira estoque de pedidos mais antigos: só com confirmação explícita (force).
   if (to === "in_transit" && !opts.force) {
@@ -187,7 +187,8 @@ export const EXPIRY_WARNING_DAYS = 10;
 
 type InventoryRow = {
   id: number; sku: string; name: string; slug: string; imageUrl: string | null; unitLabel: string; boxSize: number;
-  minStockUnits: number; active: boolean; producerName: string; onHand: number; reserved: number; available: number;
+  minStockUnits: number; active: boolean; producerName: string; producerId: number; categoryName: string; categorySlug: string;
+  onHand: number; reserved: number; available: number;
   lastMovementAt: Date | null; shelfLifeDays: number | null; nextExpiry: Date | null; expiredUnits: number; expiringUnits: number;
 };
 
@@ -195,7 +196,8 @@ export async function inventoryOverview() {
   const [rows, coverage] = await Promise.all([
     db()`
       select p.id, p.sku, p.name, p.slug, p.image_url as "imageUrl", p.unit_label as "unitLabel", p.box_size as "boxSize",
-             p.min_stock_units as "minStockUnits", p.active, pr.name as "producerName",
+             p.min_stock_units as "minStockUnits", p.active, pr.name as "producerName", pr.id as "producerId",
+             c.name as "categoryName", c.slug as "categorySlug",
              ps.on_hand as "onHand", ps.reserved, ps.available,
              (select max(created_at) from stock_movements m where m.product_id = p.id) as "lastMovementAt",
              p.shelf_life_days as "shelfLifeDays", b.next_expiry as "nextExpiry",
@@ -206,7 +208,8 @@ export async function inventoryOverview() {
                sum(quantity) filter (where expires_at <= now()) as expired,
                sum(quantity) filter (where expires_at > now() and expires_at <= now() + make_interval(days => ${EXPIRY_WARNING_DAYS})) as expiring
         from stock_batches sb where sb.product_id = p.id and sb.quantity > 0
-      ) b on true join producers pr on pr.id = p.producer_id join product_stock ps on ps.product_id = p.id
+      ) b on true join producers pr on pr.id = p.producer_id join categories c on c.id = p.category_id
+      join product_stock ps on ps.product_id = p.id
       order by p.name` as Promise<InventoryRow[]>,
     openOrdersCoverage(),
   ]);

@@ -137,6 +137,7 @@ export function Header() {
           </Link>
           <nav className="nav" aria-label="Principal">
             {NAV.map((n) => <Link key={n.to} to={n.to}>{n.label}</Link>)}
+            {wa.viaWhatsApp && <Link to="/#como-comprar">Como comprar</Link>}
           </nav>
           <Search />
           <div className="header-actions">
@@ -151,20 +152,21 @@ export function Header() {
             ) : (
               <Link to="/entrar" className="header-link" aria-label="Entrar"><Icon name="user" /><span className="label">Entrar</span></Link>
             )}
-            {wa.viaWhatsApp ? (
-              <a href={wa.link("Olá! Quero fazer um pedido.")} target="_blank" rel="noreferrer" className="header-link header-wa" aria-label="Pedir pelo WhatsApp">
+            {wa.viaWhatsApp && wa.number && (
+              <a href={wa.link("Olá! Vim pelo site da Encantos da Serra.")} target="_blank" rel="noreferrer" className="header-link header-wa" aria-label="Falar no WhatsApp">
                 <WhatsAppGlyph /><span className="label">WhatsApp</span>
               </a>
-            ) : (
-              <Link to="/carrinho" className="header-link" aria-label={cartCount ? `Carrinho, ${cartCount} ${cartCount === 1 ? "item" : "itens"}` : "Carrinho vazio"}>
-                <Icon name="cart" /><span className="label">Carrinho</span>
-                {cartCount > 0 && <span className="cart-count" aria-hidden="true">{cartCount}</span>}
-              </Link>
             )}
+            <Link to="/carrinho" className="header-link" aria-label={cartCount ? `Carrinho, ${cartCount} ${cartCount === 1 ? "item" : "itens"}` : "Carrinho vazio"}>
+              <Icon name="cart" /><span className="label">Carrinho</span>
+              {cartCount > 0 && <span className="cart-count" aria-hidden="true">{cartCount}</span>}
+            </Link>
           </div>
         </div>
         <nav className="mobile-nav" id="mobile-nav" data-open={menu} aria-label="Menu do celular">
           {NAV.map((n) => <Link key={n.to} to={n.to}>{n.label}</Link>)}
+          {wa.viaWhatsApp && <Link to="/#como-comprar">Como comprar</Link>}
+          <Link to="/carrinho">Carrinho</Link>
           <Link to="/produtores">Para produtores</Link>
           <Link to="/rastrear">Rastrear pedido</Link>
         </nav>

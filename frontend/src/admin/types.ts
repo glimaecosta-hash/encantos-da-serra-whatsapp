@@ -46,6 +46,9 @@ export type InventoryProduct = {
   minStockUnits: number;
   active: boolean;
   producerName: string;
+  producerId: number;
+  categoryName: string;
+  categorySlug: string;
   onHand: number;
   reserved: number;
   available: number;

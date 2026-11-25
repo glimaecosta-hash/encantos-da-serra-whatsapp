@@ -24,7 +24,29 @@ export type ConversationItem = {
   assignedTo: number | null;
   orderCode: string | null;
   orderTotalCents: number | null;
-  lastMessage: { author: string; body: string; at: string } | null;
+  lastMessage: { author: string; body: string; at: string; status?: MessageStatus } | null;
+  pendingApproval: number;              // respostas do robô esperando aprovação (modo supervisionado)
+  review: Review | null;
+};
+
+export type MessageStatus = "sent" | "pending" | "discarded";
+export type Review = "ok" | "corrigida" | "problema";
+// "Por que o robô respondeu isso": motor, o que consultou e a etapa da conversa.
+export type MessageMeta = { engine: "ia" | "regras"; trace: string[]; state: string; handoff?: string };
+
+export type ChatMessage = {
+  id: number;
+  author: "customer" | "bot" | "agent" | "note" | "system";
+  body: string;
+  options: { key: string; label: string }[] | null;
+  createdAt: string;
+  agentName: string | null;
+  status: MessageStatus;
+  meta: MessageMeta | null;
+  approval: "approved" | "edited" | "discarded" | null;
+  approvedBy: string | null;
+  rating: "good" | "bad" | null;
+  ratingNote: string | null;
 };
 
 export type CartLine = { productId: number; sku: string; name: string; unitLabel: string; priceCents: number; quantity: number };
@@ -36,13 +58,25 @@ export type ConversationDetail = {
     lostReason: string | null;
     contactNotes: string | null;
     orderId: number | null;
+    reviewNote: string | null;
+    reviewedAt: string | null;
+    reviewedBy: string | null;
   };
-  messages: { id: number; author: "customer" | "bot" | "agent" | "note" | "system"; body: string; options: { key: string; label: string }[] | null; createdAt: string; agentName: string | null }[];
+  messages: ChatMessage[];
   orders: { code: string; status: string; totalCents: number; discountCents: number; source: string; createdAt: string; scheduledDelivery: string | null }[];
   history: { id: number; stage: Stage; topic: Topic; createdAt: string; closedAt: string | null }[];
 };
 
-export type Counts = Record<"open" | "attention" | "mine" | "bot" | "waiting" | "negotiating" | "awaiting_customer" | "closed", number>;
+export type Counts = Record<"open" | "attention" | "approval" | "mine" | "bot" | "waiting" | "negotiating" | "awaiting_customer" | "closed", number>;
+
+// Etapas do robô de regras em palavras simples (para "por que respondeu isso").
+export const BOT_STATE_LABEL: Record<string, string> = {
+  start: "início", menu: "menu principal", categories: "escolhendo a linha", products: "escolhendo o produto", quantity: "quantidade",
+  cart: "carrinho", empty_cart: "carrinho vazio", remove_item: "removendo item", checkout_cep: "CEP da entrega", delivery_cep: "consulta de entrega",
+  out_of_area: "CEP fora da área", addr_recipient: "nome de quem recebe", addr_street: "rua e número", addr_district: "bairro",
+  addr_city: "cidade", addr_complement: "complemento", addr_document: "CPF para o pagamento", confirm: "confirmação do pedido",
+  wholesale_details: "pedido de atacado", human: "transferido para a equipe", ai: "conversa livre (IA)",
+};
 
 // Etapas na linguagem de quem atende: o que é, e o que fazer.
 export const STAGE_INFO: Record<Stage, { label: string; short: string; help: string }> = {

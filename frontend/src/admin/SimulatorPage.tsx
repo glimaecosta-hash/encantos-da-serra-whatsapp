@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../api";
 import { Icon } from "../icons";
-import { Link } from "../router";
+import { Link, useLocation } from "../router";
 import { useApi, useStore } from "../store";
 import { clock, initials, WaText } from "./attendance";
 
@@ -15,6 +15,9 @@ const SUGGESTIONS = ["oi", "menu", "atendente", "carrinho", "Quero pedir Queijo 
 
 export function SimulatorPage() {
   const { toast } = useStore();
+  const { search } = useLocation();
+  // Testar o rascunho da Central do Robô (só aqui no Simulador; clientes usam a versão publicada).
+  const [useDraft, setUseDraft] = useState(() => search.get("rascunho") === "1");
   const contacts = useApi<{ contacts: SimContact[] }>("/admin/atendimento/simulator/contacts");
   const [phone, setPhone] = useState("31987654321");
   const [name, setName] = useState("Cliente Teste");
@@ -50,7 +53,7 @@ export function SimulatorPage() {
     setText("");
     setMessages((m) => [...m, { id: -Date.now(), author: "customer", body: msg, options: null, createdAt: new Date().toISOString() }]);
     try {
-      const r = await api<{ messages: SimMessage[] }>("/admin/atendimento/simulator/messages", { body: { phone, name: name.trim() || undefined, text: msg } });
+      const r = await api<{ messages: SimMessage[] }>("/admin/atendimento/simulator/messages", { body: { phone, name: name.trim() || undefined, text: msg, useDraft } });
       setMessages(r.messages);
       contacts.reload();
     } catch (e) {
@@ -101,6 +104,15 @@ export function SimulatorPage() {
         </div>
 
         <div className="sim-side">
+          <section className="adm-card sim-card sim-version" data-draft={useDraft}>
+            <h2>Versão do robô</h2>
+            <div className="adm-seg" role="group" aria-label="Versão do robô no teste">
+              <button aria-pressed={!useDraft} onClick={() => setUseDraft(false)}>Publicada (a dos clientes)</button>
+              <button aria-pressed={useDraft} onClick={() => setUseDraft(true)}>Rascunho</button>
+            </div>
+            <small className="adm-muted">{useDraft ? "Você está testando o rascunho da " : "Para testar mudanças antes de publicar, escolha Rascunho. Edite em "}<Link to="/admin/robo" style={{ textDecoration: "underline" }}>Central do Robô</Link>.</small>
+          </section>
+
           <section className="adm-card sim-card">
             <h2>Quem está escrevendo</h2>
             <div className="att-row2">

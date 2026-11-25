@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api } from "./api";
+import { api, type Cart } from "./api";
+import { brl } from "./format";
 import { Icon } from "./icons";
 import { useLocation } from "./router";
 
@@ -33,7 +34,23 @@ export function useWhatsApp() {
 export const productMessage = (p: { name: string; sku: string }, qty?: number, unit?: string) =>
   `Olá! Quero pedir ${qty && qty > 1 ? `${qty} ${unit ?? "un"} de ` : ""}${p.name} (cód. ${p.sku})`;
 
-export const wholesaleMessage = (lines: { name: string; boxes: number }[]) =>
+// Carrinho inteiro: uma linha por item com o código, que o chatbot lê para montar o pedido de uma vez.
+// O formato é lido por siteCartFromMessage() no backend (lib/bot.ts) — mude os dois juntos.
+export function cartMessage(cart: Cart, cep?: string) {
+  const lines = cart.lines.map((l) =>
+    l.mode === "box"
+      ? `• ${l.quantity} cx ${l.product.name} (cód. ${l.product.sku})`
+      : `• ${l.quantity}× ${l.product.name} (cód. ${l.product.sku})`);
+  const digits = cep?.replace(/\D/g, "") ?? "";
+  return [
+    "Olá! Quero finalizar meu pedido do site:",
+    ...lines,
+    `Subtotal no site: ${brl(cart.totals.subtotalCents)}`,
+    ...(digits.length === 8 ? [`CEP: ${digits.slice(0, 5)}-${digits.slice(5)}`] : []),
+  ].join("\n");
+}
+
+export const wholesaleMessage =(lines: { name: string; boxes: number }[]) =>
   `Olá! Tenho interesse em compra para empresa (atacado):\n${lines.map((l) => `• ${l.boxes} cx ${l.name}`).join("\n")}`;
 
 export function WhatsAppGlyph({ size = 20 }: { size?: number }) {
@@ -45,10 +62,10 @@ export function WhatsAppGlyph({ size = 20 }: { size?: number }) {
 }
 
 // Botão verde padrão. `href` já vem com a mensagem pronta.
-export function WhatsAppButton({ href, children, className = "", disabled }: { href: string; children: React.ReactNode; className?: string; disabled?: boolean }) {
+export function WhatsAppButton({ href, children, className = "", disabled, onClick }: { href: string; children: React.ReactNode; className?: string; disabled?: boolean; onClick?: () => void }) {
   if (disabled) return <button className={`btn btn-wa ${className}`} disabled>{children}</button>;
   return (
-    <a className={`btn btn-wa ${className}`} href={href} target="_blank" rel="noreferrer">
+    <a className={`btn btn-wa ${className}`} href={href} target="_blank" rel="noreferrer" onClick={onClick}>
       <WhatsAppGlyph size={18} />{children}
     </a>
   );
@@ -71,8 +88,8 @@ export function WhatsAppFloat() {
 export function HowToBuy({ compact }: { compact?: boolean }) {
   const wa = useWhatsApp();
   const steps = [
-    { icon: "search" as const, title: "Escolha no site", text: "Veja fotos, origem, cura e preço de cada produto." },
-    { icon: "chat" as const, title: "Peça pelo WhatsApp", text: "O botão abre a conversa já com o produto. Nosso atendente virtual monta o pedido e calcula o frete pelo CEP." },
+    { icon: "cart" as const, title: "Monte seu carrinho", text: "Veja fotos, origem, cura e preço, e junte quantos produtos quiser no carrinho." },
+    { icon: "chat" as const, title: "Finalize pelo WhatsApp", text: "Um toque e o pedido chega pronto na conversa. Nosso atendente confirma o frete pelo CEP e o endereço." },
     { icon: "snowflake" as const, title: "Receba refrigerado", text: "Confirmamos o pagamento por lá e você acompanha cada etapa da entrega no mesmo número." },
   ];
   return (
@@ -80,7 +97,7 @@ export function HowToBuy({ compact }: { compact?: boolean }) {
       <div className="how-buy-head">
         <span className="eyebrow">Como comprar</span>
         <h2 id="how-buy-title">Seu pedido em uma conversa</h2>
-        {!compact && <p>Sem cadastro e sem formulário: tudo pelo WhatsApp, com uma pessoa da equipe sempre que você precisar.</p>}
+        {!compact && <p>Sem cadastro e sem formulário: você escolhe aqui e fecha pelo WhatsApp, com uma pessoa da equipe sempre que precisar.</p>}
       </div>
       <ol className="how-buy-steps">
         {steps.map((s, i) => (

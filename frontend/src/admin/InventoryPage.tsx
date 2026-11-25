@@ -5,6 +5,7 @@ import { Icon } from "../icons";
 import { Link } from "../router";
 import { useApi, useStore } from "../store";
 import { Dialog } from "./Dialog";
+import { BatchDialog, exportInventoryCsv, printCountSheet } from "./inventoryTools";
 import { boxesNeeded, daysUntil, MOVEMENT_LABEL, STOCK_LABEL, timeAgo, unitsBoxes, type Batch, type Inventory, type InventoryProduct, type Movement } from "./types";
 
 const KINDS = [
@@ -57,16 +58,40 @@ function StockBar({ p }: { p: InventoryProduct }) {
 
 export function InventoryPage() {
   const { data, loading, reload, setData } = useApi<Inventory>("/admin/inventory");
+  const { toast } = useStore();
   const [view, setView] = useState<"issues" | "all">("all");
   const [q, setQ] = useState("");
+  const [producer, setProducer] = useState("");
+  const [category, setCategory] = useState("");
   const [selected, setSelected] = useState<InventoryProduct | null>(null);
+  const [batch, setBatch] = useState<"contagem" | "entrada" | null>(null);
+  const [pausing, setPausing] = useState<number | null>(null);
 
+  const all = data?.products ?? [];
+  const producers = useMemo(() => [...new Map(all.map((p) => [p.producerId, p.producerName])).entries()].sort((a, b) => a[1].localeCompare(b[1])), [all]);
+  const categories = useMemo(() => [...new Map(all.map((p) => [p.categorySlug, p.categoryName])).entries()].sort((a, b) => a[1].localeCompare(b[1])), [all]);
+
+  // A lista já vem do mais urgente para o menos (falta, validade, zerado, abaixo do mínimo).
   const products = useMemo(() => {
     const term = q.trim().toLowerCase();
-    return (data?.products ?? []).filter((p) =>
+    return all.filter((p) =>
       (view === "all" || needsAttention(p)) &&
+      (!producer || String(p.producerId) === producer) &&
+      (!category || p.categorySlug === category) &&
       (!term || p.name.toLowerCase().includes(term) || p.sku.toLowerCase().includes(term) || p.producerName.toLowerCase().includes(term)));
-  }, [data, view, q]);
+  }, [all, view, q, producer, category]);
+
+  // Pausar no site: o produto some da loja e do robô, mas continua no estoque.
+  const togglePause = async (p: InventoryProduct) => {
+    setPausing(p.id);
+    try {
+      await api(`/admin/products/${p.id}`, { method: "PATCH", body: { active: !p.active } });
+      toast({ message: p.active ? `${p.name} pausado: saiu da loja e do robô.` : `${p.name} voltou para a loja.` });
+      reload();
+    } catch (e) {
+      toast({ message: e instanceof ApiError ? e.message : "Não foi possível mudar", kind: "error" });
+    } finally { setPausing(null); }
+  };
 
   // Mantém o produto aberto no diálogo sincronizado depois de uma movimentação.
   useEffect(() => {
@@ -83,11 +108,15 @@ export function InventoryPage() {
           <h1>Estoque</h1>
           <p><b>Físico</b> é o que está na câmara fria. <b>Reservado</b> são pedidos abertos ainda não expedidos. <b>Disponível</b> é o que a loja pode vender: físico menos vencidas e reservas.</p>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn btn-outline btn-sm" onClick={reload} disabled={loading}>
-            <Icon name={loading ? "loader" : "route"} className={loading ? "icon-sm spin" : "icon-sm"} />Atualizar
+        <div className="inv-actions">
+          <button className="btn btn-primary btn-sm" onClick={() => setBatch("entrada")} disabled={!all.length}><Icon name="truck" className="icon-sm" />Entrada de coleta</button>
+          <button className="btn btn-outline btn-sm" onClick={() => setBatch("contagem")} disabled={!all.length}><Icon name="boxes" className="icon-sm" />Contagem em lote</button>
+          <button className="btn btn-outline btn-sm" onClick={() => { if (!printCountSheet(products)) toast({ message: "Permita pop-ups para imprimir.", kind: "error" }); }} disabled={!products.length}><Icon name="receipt" className="icon-sm" />Folha de contagem</button>
+          <button className="btn btn-outline btn-sm" onClick={() => exportInventoryCsv(products)} disabled={!products.length}><Icon name="layers" className="icon-sm" />Exportar planilha</button>
+          <button className="btn btn-outline btn-sm" onClick={reload} disabled={loading} aria-label="Atualizar">
+            <Icon name={loading ? "loader" : "route"} className={loading ? "icon-sm spin" : "icon-sm"} />
           </button>
-          <Link to="/admin/produtos/novo" className="btn btn-primary btn-sm"><Icon name="plus" className="icon-sm" />Novo produto</Link>
+          <Link to="/admin/produtos/novo" className="btn btn-outline btn-sm"><Icon name="plus" className="icon-sm" />Novo produto</Link>
         </div>
       </div>
 
@@ -129,6 +158,14 @@ export function InventoryPage() {
           <button aria-pressed={view === "all"} onClick={() => setView("all")}>Todos</button>
           <button aria-pressed={view === "issues"} onClick={() => setView("issues")}>Precisa de atenção {issues > 0 && <span className="adm-count">{issues}</span>}</button>
         </div>
+        <select className="input inv-filter" value={producer} onChange={(e) => setProducer(e.target.value)} aria-label="Filtrar por produtor">
+          <option value="">Todos os produtores</option>
+          {producers.map(([id, name]) => <option key={id} value={String(id)}>{name}</option>)}
+        </select>
+        <select className="input inv-filter" value={category} onChange={(e) => setCategory(e.target.value)} aria-label="Filtrar por categoria">
+          <option value="">Todas as categorias</option>
+          {categories.map(([slug, name]) => <option key={slug} value={slug}>{name}</option>)}
+        </select>
         <label className="adm-search">
           <Icon name="search" className="icon-sm" />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Produto, SKU ou produtor" aria-label="Buscar produtos" />
@@ -137,7 +174,7 @@ export function InventoryPage() {
 
       <div className="adm-card">
         <div className="adm-table-wrap">
-          <table className="adm-table">
+          <table className="adm-table inv-table">
             <thead>
               <tr>
                 <th>Produto</th>
@@ -153,21 +190,22 @@ export function InventoryPage() {
               {loading && !data && <tr><td colSpan={7}><div className="skeleton" style={{ height: 200 }} /></td></tr>}
               {data && products.length === 0 && <tr><td colSpan={7} className="adm-empty">Nada por aqui. {view === "issues" ? "Todos os produtos estão em dia." : ""}</td></tr>}
               {products.map((p) => (
-                <tr key={p.id} className="adm-row" data-stock={p.status} data-expiry={p.expiry ?? undefined} onClick={() => setSelected(p)}>
-                  <td>
+                <tr key={p.id} className="adm-row" data-stock={p.status} data-expiry={p.expiry ?? undefined} data-paused={!p.active || undefined} onClick={() => setSelected(p)}>
+                  <td data-label="Produto">
                     <span className="adm-prod">
                       {p.imageUrl ? <img src={p.imageUrl} alt="" /> : <span />}
                       <span>
                         <span className="adm-strong">{p.name}</span>
                         <small className="adm-muted">{p.sku} · {p.producerName}</small>
+                        {!p.active && <small className="inv-paused">Pausado no site</small>}
                       </span>
                     </span>
                   </td>
-                  <td className="num"><b>{p.onHand.toLocaleString("pt-BR")}</b><small className="adm-muted">{Math.floor(p.onHand / p.boxSize)} cx</small></td>
-                  <td className="num">{p.reserved.toLocaleString("pt-BR")}<small className="adm-muted">{p.openOrders} {p.openOrders === 1 ? "pedido" : "pedidos"}</small></td>
-                  <td className="num"><b className={p.available < 0 ? "adm-neg" : ""}>{p.available.toLocaleString("pt-BR")}</b><small className="adm-muted">mín. {p.minStockUnits}</small></td>
+                  <td className="num" data-label="Físico"><b>{p.onHand.toLocaleString("pt-BR")}</b><small className="adm-muted">{Math.floor(p.onHand / p.boxSize)} cx</small></td>
+                  <td className="num" data-label="Reservado">{p.reserved.toLocaleString("pt-BR")}<small className="adm-muted">{p.openOrders} {p.openOrders === 1 ? "pedido" : "pedidos"}</small></td>
+                  <td className="num" data-label="Disponível"><b className={p.available < 0 ? "adm-neg" : ""}>{p.available.toLocaleString("pt-BR")}</b><small className="adm-muted">mín. {p.minStockUnits}</small></td>
                   <td className="bar-col"><StockBar p={p} /></td>
-                  <td>
+                  <td data-label="Situação">
                     {(p.status !== "ok" || !p.expiry) && <span className="adm-stock" data-stock={p.status}>{STOCK_LABEL[p.status]}</span>}
                     {p.shortUnits > 0 && <small className="adm-warn">faltam {p.shortUnits} un</small>}
                     <ExpiryPill p={p} />
@@ -175,6 +213,8 @@ export function InventoryPage() {
                   <td className="actions" onClick={(e) => e.stopPropagation()}>
                     <span className="adm-actions">
                       <button className="btn btn-sm btn-outline" onClick={() => setSelected(p)}>Movimentar</button>
+                      <button className="btn btn-sm btn-ghost-line" disabled={pausing === p.id} onClick={() => togglePause(p)}
+                        title={p.active ? "Tirar da loja e do robô sem apagar" : "Voltar a vender na loja"}>{p.active ? "Pausar" : "Ativar"}</button>
                       <Link to={`/admin/produtos/${p.id}`} className="btn btn-sm btn-ghost-line" aria-label={`Editar preço e dados de ${p.name}`}>Editar</Link>
                     </span>
                   </td>
@@ -184,6 +224,8 @@ export function InventoryPage() {
           </table>
         </div>
       </div>
+
+      <BatchDialog kind={batch} products={all} onClose={() => setBatch(null)} onSaved={(inv) => setData(inv)} />
 
       <Dialog open={!!selected} onClose={() => setSelected(null)} title={selected?.name ?? ""} wide>
         {selected && <ProductPanel product={selected} onChanged={(inv) => setData(inv)} />}
@@ -254,7 +296,7 @@ function ProductPanel({ product: p, onChanged }: { product: InventoryProduct; on
           <Icon name="box" className="icon-sm" />
           <div>
             <b>Faltam {p.shortUnits} un{p.boxSize > 1 ? ` (${boxesNeeded(p.shortUnits, p.boxSize)} cx)` : ""} para cobrir os pedidos abertos.</b>
-            <span>Registre uma entrada ou veja os pedidos afetados em <Link to="/admin" style={{ textDecoration: "underline" }}>Pedidos › Sem cobertura</Link>.</span>
+            <span>Registre uma entrada ou veja os pedidos afetados em <Link to="/admin/pedidos" style={{ textDecoration: "underline" }}>Pedidos › Sem cobertura</Link>.</span>
           </div>
         </div>
       )}

@@ -15,6 +15,20 @@ export function isValidCnpj(input: string): boolean {
   return cnpj.endsWith(`${d1}${d2}`);
 }
 
+// Valida os dígitos verificadores do CPF (11 dígitos).
+export function isValidCpf(input: string): boolean {
+  const cpf = onlyDigits(input);
+  if (cpf.length !== 11 || /^(\d)\1+$/.test(cpf)) return false;
+  const digit = (base: string) => {
+    const sum = [...base].reduce((acc, ch, i) => acc + Number(ch) * (base.length + 1 - i), 0);
+    const rest = (sum * 10) % 11;
+    return rest === 10 ? 0 : rest;
+  };
+  const d1 = digit(cpf.slice(0, 9));
+  const d2 = digit(cpf.slice(0, 9) + d1);
+  return cpf.endsWith(`${d1}${d2}`);
+}
+
 export function formatCnpj(input: string): string {
   const c = onlyDigits(input);
   return `${c.slice(0, 2)}.${c.slice(2, 5)}.${c.slice(5, 8)}/${c.slice(8, 12)}-${c.slice(12)}`;

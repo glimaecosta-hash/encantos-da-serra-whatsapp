@@ -3,10 +3,13 @@ import { type Home as HomeData, type ProductList } from "../api";
 import { CepLookup } from "../components/CepLookup";
 import { HeroBanner, type Slide } from "../components/HeroBanner";
 import { ProductRail } from "../components/ProductRail";
-import { Icon } from "../icons";
+import { Icon, type IconName } from "../icons";
 import { Link } from "../router";
 import { useApi } from "../store";
-import { HowToBuy, useWhatsApp } from "../whatsapp";
+import { HowToBuy, useWhatsApp, WhatsAppButton } from "../whatsapp";
+
+// Home no padrão de vitrine: promessa → confiança → produtos → como comprar → quem faz → entrega → chamada final.
+// Cada bloco tem um único próximo passo, sempre no mesmo estilo de botão.
 
 // Atalhos do topo da vitrine. A API não manda foto de categoria; usamos um produto representativo
 // (o protótipo repete a mesma foto nos queijos frescos, então eles usam um recorte da mesa).
@@ -40,6 +43,57 @@ function slidesFrom(data: HomeData | null): Slide[] {
   ];
 }
 
+// Ícone para cada número de confiança vindo da API (na ordem em que ela manda).
+const TRUST_ICONS: IconName[] = ["truck", "farmer", "award", "snowflake"];
+
+function TrustBar({ data }: { data: HomeData | null }) {
+  const stats = data?.stats ?? [];
+  if (!stats.length) return <div className="container"><div className="skeleton trust-skeleton" /></div>;
+  return (
+    <ul className="container trust-bar" aria-label="Por que comprar com a gente">
+      {stats.map((s, i) => (
+        <li key={s.label}>
+          <span className="trust-icon"><Icon name={TRUST_ICONS[i] ?? "checkCircle"} /></span>
+          <span><b>{s.value}</b><small>{s.label}</small></span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// Prova social: gente de verdade por trás de cada queijo.
+function MakersStory({ data }: { data: HomeData | null }) {
+  const lot = data?.lotOfTheWeek;
+  const producers = data?.trust.partnerProducers;
+  return (
+    <section className="section makers" aria-labelledby="makers-title">
+      <div className="container makers-grid">
+        <div className="makers-media">
+          <img src={lot?.producerImageUrl ?? "/images/site/produtores-maria-jose.jpg"} alt={lot?.ownerName ? `${lot.ownerName}, produtora parceira` : "Produtores parceiros na fazenda"} loading="lazy" />
+        </div>
+        <div className="makers-copy">
+          <span className="eyebrow">Quem faz</span>
+          <h2 id="makers-title">Cada queijo tem nome, sobrenome e endereço na serra.</h2>
+          <p>
+            Trabalhamos direto com {producers ? `${producers} famílias produtoras` : "pequenas famílias produtoras"} de Minas. Você sabe de qual fazenda veio,
+            quantos dias curou e acompanha a viagem refrigerada até a sua porta.
+          </p>
+          {lot && (
+            <p className="makers-lot">
+              <Icon name="award" className="icon-sm" />
+              <span>Lote da semana: <b>{lot.title}</b>{lot.ownerName ? ` · por ${lot.ownerName}` : ""} · {lot.city}/{lot.state}</span>
+            </p>
+          )}
+          <div className="makers-cta">
+            <Link to="/nossa-historia" className="btn btn-outline">Conheça nossa história <Icon name="arrowRight" className="icon-sm" /></Link>
+            {lot && <Link to={`/produtos/${lot.productSlug}`} className="link">Ver o lote da semana</Link>}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 const merge = (...lists: (ProductList | null)[]) => (lists.every(Boolean) ? lists.flatMap((l) => l!.items) : null);
 
 export function useHome() {
@@ -59,6 +113,8 @@ export function HomePage() {
   return (
     <>
       <h1 className="sr-only">Encantos da Serra: laticínios artesanais da serra</h1>
+
+      {/* 1. Promessa */}
       <div className="container shop-top">
         <HeroBanner slides={slidesFrom(data)} />
         <div className="promo-stack">
@@ -73,6 +129,10 @@ export function HomePage() {
         </div>
       </div>
 
+      {/* 2. Confiança */}
+      <TrustBar data={data} />
+
+      {/* 3. Escolha rápida por linha */}
       <nav className="container shortcuts" aria-label="Categorias">
         {SHORTCUTS.map((s) => (
           <Link key={s.label} to={s.to} className="shortcut">
@@ -82,14 +142,26 @@ export function HomePage() {
         ))}
       </nav>
 
+      {/* 4. O que mais sai */}
+      <div className="container rails">
+        <ProductRail id="mais-vendidos" title="Mais vendidos" href="/produtos?ordem=best_sellers" products={best.data?.items ?? null} />
+      </div>
+
+      {/* 5. Como comprar (carrinho → WhatsApp) */}
       {wa.viaWhatsApp && <div className="container" id="como-comprar"><HowToBuy /></div>}
 
       <div className="container rails">
-        <ProductRail id="mais-vendidos" title="Mais vendidos" href="/produtos?ordem=best_sellers" products={best.data?.items ?? null} />
         <ProductRail id="queijos" title="Queijos da serra" href="/produtos?categoria=queijos-maturados" products={merge(matured.data, fresh.data)} />
+      </div>
+
+      {/* 6. Quem faz */}
+      <MakersStory data={data} />
+
+      <div className="container rails">
         <ProductRail id="doces" title="Doce de leite e manteiga" href="/produtos?categoria=doce-de-leite" products={merge(sweets.data, butter.data)} />
       </div>
 
+      {/* 7. Entrega */}
       <section className="section-tight section-alt" id="entrega" aria-labelledby="entrega-titulo">
         <div className="container delivery">
           <div>
@@ -97,6 +169,20 @@ export function HomePage() {
             <p>Digite seu CEP para ver o frete e o próximo dia de entrega.</p>
           </div>
           <CepLookup />
+        </div>
+      </section>
+
+      {/* 8. Chamada final */}
+      <section className="container" aria-labelledby="final-cta-title">
+        <div className="final-cta">
+          <div>
+            <h2 id="final-cta-title">Monte sua tábua da serra</h2>
+            <p>Escolha no site e finalize pelo WhatsApp, com uma pessoa da equipe sempre que precisar.</p>
+          </div>
+          <div className="final-cta-actions">
+            <Link to="/produtos" className="btn btn-gold btn-lg">Ver todos os produtos <Icon name="arrowRight" /></Link>
+            {wa.viaWhatsApp && wa.number && <WhatsAppButton href={wa.link("Olá! Vim pelo site e quero uma ajuda para escolher.")} className="btn-lg">Pedir ajuda</WhatsAppButton>}
+          </div>
         </div>
       </section>
     </>

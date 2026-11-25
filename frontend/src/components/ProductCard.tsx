@@ -4,13 +4,13 @@ import { brl } from "../format";
 import { Icon } from "../icons";
 import { Link } from "../router";
 import { useStore } from "../store";
-import { productMessage, useWhatsApp, WhatsAppButton } from "../whatsapp";
+import { productMessage, useWhatsApp, WhatsAppGlyph } from "../whatsapp";
 
 export const isBusiness = (role?: string) => role === "business" || role === "admin";
 
 // Card enxuto: foto, nome, origem, preço e um botão. Conta B2B vê o preço por caixa direto.
 export function ProductCard({ product: p }: { product: Product }) {
-  const { addToCart, toast, user } = useStore();
+  const { addToCart, toast, user, setCartOpen } = useStore();
   const [busy, setBusy] = useState(false);
   const b2b = isBusiness(user?.role);
   const firstTier = p.wholesale.tiers[0];
@@ -20,7 +20,7 @@ export function ProductCard({ product: p }: { product: Product }) {
     setBusy(true);
     try {
       await addToCart(p.id, b2b ? "box" : "unit");
-      toast({ message: `${p.name}${b2b ? ` (${p.wholesale.boxLabel.toLowerCase()})` : ""} no carrinho.`, href: "/carrinho", hrefLabel: "Ver carrinho" });
+      setCartOpen(true);
     } catch (e) {
       toast({ message: e instanceof ApiError ? e.message : "Não foi possível adicionar", kind: "error" });
     } finally { setBusy(false); }
@@ -40,15 +40,16 @@ export function ProductCard({ product: p }: { product: Product }) {
             ? <><b>{brl((firstTier?.unitPriceCents ?? 0) * p.wholesale.boxSize)}</b><small>{p.wholesale.boxLabel.toLowerCase()}</small></>
             : <><b>{brl(p.retail.priceCents)}</b><small>{p.retail.priceLabel}</small></>}
         </div>
-        {wa.viaWhatsApp ? (
-          <WhatsAppButton className="btn-block" disabled={!p.stock.available} href={wa.link(b2b ? `Olá! Tenho interesse em compra para empresa (atacado): ${p.name} (${p.wholesale.boxLabel.toLowerCase()}, cód. ${p.sku})` : productMessage(p))}>
-            {!p.stock.available ? "Sem estoque" : b2b ? "Negociar caixas" : "Pedir pelo WhatsApp"}
-          </WhatsAppButton>
-        ) : (
         <button className="btn btn-primary btn-block" onClick={add} disabled={busy || !p.stock.available} aria-label={p.stock.available ? `Adicionar ${p.name} ao carrinho` : `${p.name} sem estoque`}>
-          {!p.stock.available ? "Sem estoque" : "Adicionar"}
+          {!p.stock.available ? "Sem estoque" : b2b ? "Adicionar caixa" : "Adicionar ao carrinho"}
           <Icon name={busy ? "loader" : "cartPlus"} className={busy ? "icon-sm spin" : "icon-sm"} />
         </button>
+        {/* Atalho para quem quer um item só: abre a conversa já com o produto. */}
+        {wa.viaWhatsApp && wa.number && p.stock.available && (
+          <a className="wa-alt" target="_blank" rel="noreferrer"
+            href={wa.link(b2b ? `Olá! Tenho interesse em compra para empresa (atacado): ${p.name} (${p.wholesale.boxLabel.toLowerCase()}, cód. ${p.sku})` : productMessage(p))}>
+            <WhatsAppGlyph size={16} />{b2b ? "Negociar pelo WhatsApp" : "Pedir só este pelo WhatsApp"}
+          </a>
         )}
       </div>
     </article>

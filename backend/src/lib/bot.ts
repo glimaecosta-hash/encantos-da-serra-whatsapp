@@ -1,3 +1,5 @@
+import { containsKeyword, DEFAULT_BOT_CONFIG, matchFaq, renderGreeting, type BotConfig } from "./botConfig";
+import { isValidCnpj, isValidCpf } from "./cnpj";
 import { normalize, onlyDigits } from "./text";
 
 // Chatbot do WhatsApp: máquina de estados pura. Recebe o texto do cliente e o estado salvo da conversa,
@@ -21,6 +23,11 @@ export type BotData = {
   address?: BotAddress;
   fails?: number;
   returnTo?: string;
+  // Robô com IA: número da mensagem do cliente e o resumo que ele já viu (trava antes de fechar o pedido).
+  turn?: number;
+  reviewed?: { key: string; turn: number };
+  document?: string; // CPF/CNPJ (só dígitos), quando o meio de pagamento exige
+  discountPct?: number; // desconto dado pela IA, dentro do limite da Central do Robô
 };
 
 export type BotProduct = {
@@ -45,11 +52,23 @@ export type BotDeps = {
   productById(id: number): Promise<BotProduct | null>;
   productBySku(sku: string): Promise<BotProduct | null>;
   quoteCep(cep: string): Promise<CepQuote>;
-  placeOrder(input: { cart: CartLine[]; cep: string; address: Required<Omit<BotAddress, "complement">> & { complement?: string } }): Promise<
+  placeOrder(input: { cart: CartLine[]; cep: string; address: Required<Omit<BotAddress, "complement">> & { complement?: string }; discountCents?: number }): Promise<
     { ok: true; code: string; totalCents: number; shippingCents: number; scheduledDelivery: string | null } | { ok: false; message: string }
   >;
   recentOrders(): Promise<BotOrderSummary[]>;
   hours: string;
+  // Pagamento: o provedor ativo exige CPF/CNPJ? E a última cobrança do cliente (para "já paguei").
+  needsDocument?: boolean;
+  lastPayment?(): Promise<PaymentInfo | null>;
+  // Configuração da Central do Robô (saudação, perguntas frequentes, regras). Sem ela, valem os padrões.
+  config?: BotConfig;
+};
+
+export type PaymentInfo = {
+  orderCode: string;
+  status: "pending" | "paid" | "expired" | "cancelled" | "failed";
+  automatic: boolean;        // provedor confirma sozinho ou a equipe confere
+  messages: BotMessage[];    // instruções + código Pix (quando ainda está em aberto)
 };
 
 export type Handoff = { topic: "compra" | "atacado" | "pedido" | "duvida" | "reclamacao"; reason: string };
@@ -61,6 +80,7 @@ export type BotResult = {
   handoff?: Handoff;
   orderCode?: string;
   customerName?: string;
+  unanswered?: string; // pergunta que o robô não soube responder (vai para a Central do Robô)
 };
 
 export type BotInput = { state: string; data: BotData; text: string; contactName: string | null };
@@ -94,7 +114,7 @@ function ask(body: string, options?: BotOption[]): BotMessage {
 
 export const cartTotal = (cart: CartLine[]) => cart.reduce((a, l) => a + l.priceCents * l.quantity, 0);
 
-function cartText(cart: CartLine[]): string {
+export function cartText(cart: CartLine[]): string {
   const lines = cart.map((l) => `• ${l.quantity}× ${l.name} — ${brl(l.priceCents * l.quantity)}`);
   return `${lines.join("\n")}\n*Subtotal: ${brl(cartTotal(cart))}*`;
 }
@@ -141,6 +161,29 @@ export function parseCityState(text: string): { city: string; state: string } | 
 // Mensagem pronta que o site manda ("... (cód. CAN-MC600)").
 export function skuFromSiteMessage(text: string): string | undefined {
   return text.match(/c[oó]d(?:igo)?\.?\s*:?\s*([A-Z0-9][A-Z0-9-]{2,})/i)?.[1]?.toUpperCase();
+}
+
+// Carrinho do site ("Finalizar pelo WhatsApp"): uma linha por item, com quantidade e código.
+//   Olá! Quero finalizar meu pedido do site:
+//   • 2× Queijo Canastra Meia-Cura (cód. CAN-MC600)
+//   • 1 cx Doce de Leite Cremoso (cód. DDL-CR400)
+//   CEP: 30130-000
+export type SiteCartLine = { sku: string; quantity: number; box: boolean };
+export type SiteCart = { lines: SiteCartLine[]; cep?: string };
+
+export function siteCartFromMessage(text: string): SiteCart | undefined {
+  if (!/finalizar\s+(?:o\s+|meu\s+)?pedido/i.test(text)) return undefined;
+  const lines: SiteCartLine[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(/^\s*[•*\-]?\s*(\d{1,4})\s*(cx\b|caixas?\b|un\b|[x×])?\s*.+?\(c[oó]d(?:igo)?\.?\s*:?\s*([A-Z0-9][A-Z0-9-]{2,})\)/i);
+    if (!m) continue;
+    const quantity = Number(m[1]);
+    if (quantity < 1) continue;
+    lines.push({ sku: m[3]!.toUpperCase(), quantity, box: /^c/i.test(m[2] ?? "") });
+  }
+  if (lines.length === 0) return undefined;
+  const cep = text.match(/\bCEP\b\s*:?\s*(\d{5})-?(\d{3})\b/i);
+  return { lines, cep: cep ? `${cep[1]}${cep[2]}` : undefined };
 }
 
 // ---------- menus ----------
@@ -248,7 +291,7 @@ function confirmation(data: BotData): BotResult {
     `Frete refrigerado: ${fee === 0 ? "grátis" : brl(fee)}\n*Total: ${brl(sub + fee)}*\n\n` +
     `📍 Entrega para *${a.recipient}*\n${addressLine(a)}\nCEP ${data.cep}\n` +
     (s.nextDelivery ? `🚚 Previsão: ${s.nextDelivery}\n` : "") +
-    `\nO pagamento (Pix ou boleto para empresas) é combinado com um responsável depois da confirmação.`;
+    `\nDepois de confirmar, você recebe aqui mesmo os dados para pagamento.`;
   return { messages: [ask(body, CONFIRM_ACTIONS)], state: "confirm", data: { ...data, fails: 0 } };
 }
 
@@ -265,7 +308,97 @@ function nextAddressStep(data: BotData, contactName: string | null): BotResult {
   return confirmation(data);
 }
 
+const greeting = (contactName: string | null, deps: BotDeps) =>
+  renderGreeting((deps.config ?? DEFAULT_BOT_CONFIG).persona.greeting, firstName(contactName));
+
+// Pedido mínimo da Central do Robô: devolve o aviso quando o carrinho ainda não chegou lá.
+function belowMinimum(cart: CartLine[], deps: BotDeps): string | null {
+  const min = deps.config?.rules.minOrderCents ?? 0;
+  const sub = cartTotal(cart);
+  return min > 0 && sub < min ? `O pedido mínimo é de ${brl(min)}. Faltam ${brl(min - sub)} — quer acrescentar algo?` : null;
+}
+
+function cepInfo(cepFmt: string, q: Extract<CepQuote, { ok: true }>) {
+  const freeText = q.freeShippingOverCents !== null ? ` (grátis acima de ${brl(q.freeShippingOverCents)})` : "";
+  return `📍 CEP ${cepFmt} — região *${q.region}*\nFrete refrigerado: ${q.feeCents === 0 ? "grátis" : brl(q.feeCents)}${freeText}\n` +
+    (q.nextDeliveryLabel ? `🚚 Próxima rota: ${q.nextDeliveryLabel}` : "");
+}
+
+const withShipping = (data: BotData, cepFmt: string, q: Extract<CepQuote, { ok: true }>): BotData =>
+  ({ ...data, cep: cepFmt, shipping: { feeCents: q.feeCents, freeShippingOverCents: q.freeShippingOverCents, region: q.region, nextDelivery: q.nextDeliveryLabel } });
+
+// O cliente montou o carrinho no site e tocou em "Finalizar pelo WhatsApp".
+// O carrinho do site substitui o da conversa; preço e estoque vêm sempre do sistema, nunca da mensagem.
+async function receiveSiteCart(input: BotInput, deps: BotDeps, site: SiteCart): Promise<BotResult> {
+  const greet = input.state === "start" || input.state === "human" ? [{ body: greeting(input.contactName, deps) }] : [];
+  const data: BotData = { ...input.data, list: undefined, pendingProductId: undefined, fails: 0 };
+
+  if (site.lines.some((l) => l.box)) {
+    const reason = `Carrinho de atacado do site: ${site.lines.map((l) => `${l.quantity} ${l.box ? "cx" : "un"} ${l.sku}`).join(", ")}`;
+    const h = handoff(data, "atacado", reason, deps.hours, "Recebi seu carrinho com compra por caixa (atacado). Um responsável confirma preço por faixa e entrega com você.");
+    return { ...h, messages: [...greet, ...h.messages] };
+  }
+
+  const cart: CartLine[] = [];
+  const notes: string[] = [];
+  for (const l of site.lines) {
+    const p = await deps.productBySku(l.sku);
+    if (!p) { notes.push(`• Não encontrei o produto de código ${l.sku}.`); continue; }
+    const already = cart.find((c) => c.productId === p.id);
+    const wanted = l.quantity + (already?.quantity ?? 0);
+    if (p.availableUnits <= 0) { notes.push(`• *${p.name}* esgotou e ficou de fora.`); continue; }
+    const qty = Math.min(wanted, p.availableUnits);
+    if (qty < wanted) notes.push(`• *${p.name}*: temos só ${qty}, ajustei a quantidade.`);
+    if (already) already.quantity = qty;
+    else cart.push({ productId: p.id, sku: p.sku, name: p.name, unitLabel: p.unitLabel, priceCents: p.priceCents, quantity: qty });
+  }
+  const warn = notes.length ? `\n\n⚠️ ${notes.length === 1 ? "Um ajuste" : "Alguns ajustes"}:\n${notes.join("\n")}` : "";
+
+  if (cart.length === 0) {
+    const cats = await showCategories(deps, { ...data, cart: [] }, `Recebi seu carrinho do site, mas nenhum item está disponível agora 😕${warn}\n\nQuer ver outras opções?`);
+    return { ...cats, messages: [...greet, ...cats.messages] };
+  }
+
+  const big = cart.find((l) => l.quantity > 50);
+  if (big) {
+    const h = handoff({ ...data, cart }, "atacado", `Carrinho do site com ${big.quantity} un de ${big.name} — volume de atacado`, deps.hours, `Para ${big.quantity} unidades temos condição especial por caixa.`);
+    return { ...h, messages: [...greet, ...h.messages] };
+  }
+
+  const summary = { body: `🛒 *Recebi seu carrinho do site*\n${cartText(cart)}${warn}\n\n_Para mudar algo, digite *carrinho*._` };
+  const withCart: BotData = { ...data, cart };
+  const min = belowMinimum(cart, deps);
+  if (min) {
+    const c = showCart(withCart, `🛒 *Recebi seu carrinho do site*${warn}\n\n${min}`);
+    return { ...c, messages: [...greet, ...c.messages] };
+  }
+
+  if (site.cep) {
+    const q = await deps.quoteCep(site.cep);
+    if (q.ok) {
+      const cepFmt = `${site.cep.slice(0, 5)}-${site.cep.slice(5)}`;
+      const next = nextAddressStep(withShipping(withCart, cepFmt, q), input.contactName);
+      return { ...next, messages: [...greet, summary, { body: cepInfo(cepFmt, q) }, ...next.messages] };
+    }
+    const options = [{ key: "1", label: "Tentar outro CEP" }, { key: "2", label: "Falar com um atendente" }, { key: "0", label: "Voltar ao menu" }];
+    return { messages: [...greet, summary, ask(`${q.message} 😕`, options)], state: "out_of_area", data: { ...withCart, returnTo: "checkout_cep" } };
+  }
+
+  return {
+    messages: [...greet, summary, { body: "Para calcular o frete refrigerado, qual o *CEP* de entrega? (só os números)" }],
+    state: "checkout_cep",
+    data: withCart,
+  };
+}
+
 function notUnderstood(input: BotInput, again: BotResult, deps: BotDeps): BotResult {
+  // Frase com cara de pergunta que o robô não entendeu: vira sugestão de conhecimento na Central do Robô.
+  const words = input.text.trim().split(/\s+/).length;
+  const unanswered = words >= 4 || input.text.includes("?") ? input.text.trim().slice(0, 300) : undefined;
+  return { ...notUnderstoodReply(input, again, deps), unanswered };
+}
+
+function notUnderstoodReply(input: BotInput, again: BotResult, deps: BotDeps): BotResult {
   const fails = (input.data.fails ?? 0) + 1;
   if (fails >= 3) {
     return handoff(input.data, "duvida", "O bot não entendeu o cliente 3 vezes seguidas", deps.hours, "Desculpe, não consegui entender.");
@@ -279,28 +412,94 @@ function notUnderstood(input: BotInput, again: BotResult, deps: BotDeps): BotRes
   };
 }
 
+// ---------- pagamento ----------
+
+const PAID_WORDS = ["paguei", "ja paguei", "ja fiz o pix", "fiz o pix", "pix feito", "comprovante", "pagamento", "ja esta pago", "pago"];
+
+const askDocument = (data: BotData, again = false): BotResult => ({
+  messages: [{ body: again
+    ? "Esse CPF não parece válido 🤔 Confere e me manda de novo, só os números. (Para empresa, pode mandar o CNPJ.)"
+    : "Para gerar o pagamento, preciso do seu *CPF* (só os números). Se for empresa, pode mandar o CNPJ." }],
+  state: "addr_document",
+  data,
+});
+
+// "Já paguei" / "cadê o Pix?": responde com a situação real da última cobrança do cliente.
+async function paymentReply(data: BotData, state: string, deps: BotDeps): Promise<BotResult | null> {
+  const p = await deps.lastPayment?.();
+  if (!p) return null;
+  if (p.status === "paid") return menu(data, `✅ O pagamento do pedido *${p.orderCode}* já está confirmado. Posso ajudar em algo mais?`);
+  if (p.status === "pending" && p.automatic) {
+    return {
+      messages: [{ body: `Ainda não recebi a confirmação do pagamento do pedido *${p.orderCode}*. Ela é automática e costuma levar poucos minutos depois do Pix. Se precisar, o código está aqui de novo:` }, ...p.messages.slice(1)],
+      state, data,
+    };
+  }
+  if (p.status === "pending") {
+    return handoff(data, "pedido", `Cliente informou o pagamento do pedido ${p.orderCode}: conferir e confirmar em Pedidos`, deps.hours, "Obrigado! 🙏 Vou pedir para a equipe conferir o pagamento e já te confirmo por aqui.");
+  }
+  return menu(data, `O prazo de pagamento do pedido *${p.orderCode}* terminou e ele foi cancelado. Se quiser, fazemos um novo pedido agora. 🙂`);
+}
+
 // ---------- fluxo principal ----------
 
+const EMOJI = /\p{Extended_Pictographic}️?\s?/gu;
+
 export async function runBot(input: BotInput, deps: BotDeps): Promise<BotResult> {
+  let result = await runBotFlow(input, deps);
+  // O meio de pagamento exige CPF: pergunta antes do resumo final.
+  if (result.state === "confirm" && deps.needsDocument && !result.data.document) {
+    const ask = askDocument(result.data);
+    result = { ...result, messages: [...result.messages.slice(0, -1), ...ask.messages], state: ask.state };
+  }
+  // Central do Robô: sem emojis, se os donos preferirem.
+  if (deps.config && !deps.config.persona.emojis) {
+    result = { ...result, messages: result.messages.map((m) => ({ ...m, body: m.body.replace(EMOJI, "").replace(/ +\n/g, "\n").trim() })) };
+  }
+  return result;
+}
+
+async function runBotFlow(input: BotInput, deps: BotDeps): Promise<BotResult> {
   const raw = input.text.trim();
   const t = normalize(raw);
   const data: BotData = { ...input.data };
   const state = input.state;
 
+  // Carrinho vindo do site: vale em qualquer etapa (o cliente pode voltar ao site no meio da conversa).
+  const site = siteCartFromMessage(raw);
+  if (site) return receiveSiteCart(input, deps, site);
+
+  const cfg = deps.config ?? DEFAULT_BOT_CONFIG;
+
   // Comandos que valem em qualquer etapa.
   if (state !== "start" && matchesAny(t, GLOBAL.human)) return handoff(data, "duvida", "Cliente pediu para falar com um atendente", deps.hours);
+  if (containsKeyword(raw, cfg.rules.handoffKeywords)) {
+    const h = handoff(data, "duvida", `Palavra que chama a equipe (Central do Robô): "${raw.slice(0, 120)}"`, deps.hours);
+    return state === "start" ? { ...h, messages: [{ body: greeting(input.contactName, deps) }, ...h.messages] } : h;
+  }
   if (GLOBAL.complaint.some((w) => t.includes(w)) && state !== "wholesale_details") {
     return handoff(data, "reclamacao", `Possível reclamação: "${raw.slice(0, 120)}"`, deps.hours, "Sinto muito pelo ocorrido. 🙏");
   }
   if (state !== "start" && GLOBAL.menu.includes(t)) return menu(data, "Voltamos ao início. Como posso ajudar?");
   if (matchesAny(t, GLOBAL.cart) && state !== "start") return showCart(data);
+  if (state !== "confirm" && state !== "addr_document" && PAID_WORDS.some((w) => t === w || t.startsWith(`${w} `) || t.includes(` ${w}`))) {
+    const reply = await paymentReply(data, state === "start" ? "menu" : state, deps);
+    if (reply) return reply;
+  }
+  // Perguntas frequentes da Central do Robô (no começo da conversa e no menu).
+  if ((state === "start" || state === "menu") && cfg.faqs.length) {
+    const faq = matchFaq(raw, cfg.faqs);
+    if (faq) {
+      const m = menu(data, `${faq.answer}\n\nPosso ajudar em algo mais?`);
+      return state === "start" ? { ...m, messages: [{ body: greeting(input.contactName, deps) }, ...m.messages] } : m;
+    }
+  }
   if (GLOBAL.cancel.includes(t) && state !== "start") return menu({ ...data, cart: [], address: undefined }, "Tudo bem, cancelei o que estava em andamento. Como posso ajudar?");
 
   switch (state) {
     case "start":
     case "human": {
-      const name = firstName(input.contactName);
-      const hello = `Olá${name ? `, ${name}` : ""}! 👋 Aqui é o atendimento da *Encantos da Serra* — laticínios artesanais da serra mineira.`;
+      const hello = greeting(input.contactName, deps);
       // Veio do botão "Pedir pelo WhatsApp" do site: já abre o produto.
       const sku = skuFromSiteMessage(raw);
       if (sku) {
@@ -417,10 +616,13 @@ export async function runBot(input: BotInput, deps: BotDeps): Promise<BotResult>
       const opt = pickOption(raw, CART_ACTIONS);
       switch (opt?.key) {
         case "1": return showCategories(deps, data);
-        case "2":
+        case "2": {
           if (!data.cart?.length) return showCart(data);
+          const min = belowMinimum(data.cart, deps);
+          if (min) return showCart(data, min);
           if (data.cep && data.shipping) return nextAddressStep(data, input.contactName);
           return { messages: [{ body: "Para calcular o frete refrigerado, qual o *CEP* de entrega? (só os números)" }], state: "checkout_cep", data: { ...data, fails: 0 } };
+        }
         case "3": {
           const list = (data.cart ?? []).map((l) => ({ id: l.productId, label: `${l.quantity}× ${l.name}` }));
           const options = [...list.map((l, i) => ({ key: String(i + 1), label: l.label })), { key: "0", label: "Voltar ao carrinho" }];
@@ -453,11 +655,9 @@ export async function runBot(input: BotInput, deps: BotDeps): Promise<BotResult>
         const options = [{ key: "1", label: "Tentar outro CEP" }, { key: "2", label: "Falar com um atendente" }, { key: "0", label: "Voltar ao menu" }];
         return { messages: [ask(`${q.message} 😕`, options)], state: "out_of_area", data: { ...data, returnTo: state } };
       }
-      const freeText = q.freeShippingOverCents !== null ? ` (grátis acima de ${brl(q.freeShippingOverCents)})` : "";
-      const info = `📍 CEP ${cepFmt} — região *${q.region}*\nFrete refrigerado: ${q.feeCents === 0 ? "grátis" : brl(q.feeCents)}${freeText}\n` +
-        (q.nextDeliveryLabel ? `🚚 Próxima rota: ${q.nextDeliveryLabel}` : "");
+      const info = cepInfo(cepFmt, q);
       if (state === "delivery_cep") return menu(data, `${info}\n\nPosso ajudar em algo mais?`);
-      const next = nextAddressStep({ ...data, cep: cepFmt, shipping: { feeCents: q.feeCents, freeShippingOverCents: q.freeShippingOverCents, region: q.region, nextDelivery: q.nextDeliveryLabel } }, input.contactName);
+      const next = nextAddressStep(withShipping(data, cepFmt, q), input.contactName);
       return { ...next, messages: [{ body: info }, ...next.messages] };
     }
 
@@ -494,6 +694,16 @@ export async function runBot(input: BotInput, deps: BotDeps): Promise<BotResult>
       return nextAddressStep({ ...data, address: { ...data.address, complement: none ? "" : raw.slice(0, 80) } }, input.contactName);
     }
 
+    case "addr_document": {
+      const doc = onlyDigits(raw);
+      if (!isValidCpf(doc) && !isValidCnpj(doc)) {
+        const fails = (data.fails ?? 0) + 1;
+        if (fails >= 3) return handoff(data, "compra", "Cliente não conseguiu informar um CPF válido para o pagamento", deps.hours);
+        return { ...askDocument(data, true), data: { ...data, fails } };
+      }
+      return confirmation({ ...data, document: doc, fails: 0 });
+    }
+
     case "confirm": {
       const opt = pickOption(raw, CONFIRM_ACTIONS) ?? (["sim", "s", "ok", "confirmo", "pode"].includes(t) ? CONFIRM_ACTIONS[0] : undefined);
       switch (opt?.key) {
@@ -507,12 +717,12 @@ export async function runBot(input: BotInput, deps: BotDeps): Promise<BotResult>
           if (!result.ok) {
             return showCart(data, `⚠️ ${result.message}. Ajuste o carrinho e tente de novo.`);
           }
-          const clean: BotData = { address: data.address, cep: data.cep, shipping: data.shipping };
+          const clean: BotData = { address: data.address, cep: data.cep, shipping: data.shipping, document: data.document };
           return {
             messages: [{
               body: `🎉 *Pedido ${result.code} recebido!*\nTotal: ${brl(result.totalCents)}` +
                 (result.scheduledDelivery ? `\nEntrega prevista: ${dateBr(result.scheduledDelivery)}` : "") +
-                `\n\nUm responsável vai te chamar por aqui para combinar o pagamento. Você recebe cada atualização do pedido neste número.\n\nDigite *menu* se precisar de algo mais.`,
+                `\n\nJá te mando os dados para pagamento. 👇 Você recebe cada atualização do pedido neste número.`,
             }],
             state: "menu",
             data: clean,

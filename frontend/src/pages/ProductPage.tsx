@@ -5,20 +5,23 @@ import { isBusiness, ProductCard } from "../components/ProductCard";
 import { brl, grams, longDate } from "../format";
 import { Icon } from "../icons";
 import { Link, navigate } from "../router";
-import { productMessage, useWhatsApp, WhatsAppButton } from "../whatsapp";
+import { productMessage, useWhatsApp, WhatsAppGlyph } from "../whatsapp";
 import { useApi, useStore } from "../store";
 
 type Detail = {
   product: Product;
   currentLot: { code: string; title: string; producedOn: string; cureDays: number | null; notes: string | null } | null;
+  // Ficha escrita pelos donos na Central do Robô (só o que foi publicado).
+  knowledge: { fabrication: string | null; pairing: string | null; storage: string | null } | null;
   related: Product[];
+  pairsWith: Product[];
 };
 
 const MILK_LABEL: Record<string, string> = { vaca: "Leite de vaca", cabra: "Leite de cabra", bufala: "Leite de búfala", misto: "Leite misto" };
 
 export function ProductPage({ slug }: { slug: string }) {
   const { data, error, loading } = useApi<Detail>(`/products/${slug}`);
-  const { addToCart, toast, user, favorites, toggleFavorite } = useStore();
+  const { addToCart, toast, user, favorites, toggleFavorite, setCartOpen } = useStore();
   const [mode, setMode] = useState<"unit" | "box">("unit");
   const [qty, setQty] = useState(1);
   const [busy, setBusy] = useState(false);
@@ -50,7 +53,7 @@ export function ProductPage({ slug }: { slug: string }) {
     setBusy(true);
     try {
       await addToCart(p.id, mode, qty);
-      toast({ message: `${qty} ${mode === "box" ? (qty > 1 ? "caixas" : "caixa") : p.retail.unitLabel + (qty > 1 ? "s" : "")} de ${p.name} no carrinho.`, href: "/carrinho", hrefLabel: "Ver carrinho" });
+      setCartOpen(true);
     } catch (e) {
       toast({ message: e instanceof ApiError ? e.message : "Não foi possível adicionar", kind: "error" });
     } finally { setBusy(false); }
@@ -95,24 +98,31 @@ export function ProductPage({ slug }: { slug: string }) {
             </div>
             <div className="buy-row">
               <Stepper value={qty} min={1} max={max} onChange={setQty} label="Quantidade" />
-              {wa.viaWhatsApp ? (
-                <WhatsAppButton className="btn-lg" disabled={!p.stock.available}
-                  href={wa.link(mode === "box"
-                    ? `Olá! Tenho interesse em compra para empresa (atacado): ${qty} ${qty > 1 ? "caixas" : "caixa"} de ${p.name} (cód. ${p.sku})`
-                    : productMessage(p, qty, qty > 1 ? `${p.retail.unitLabel}s` : p.retail.unitLabel))}>
-                  {!p.stock.available ? "Sem estoque" : mode === "box" ? "Negociar pelo WhatsApp" : "Pedir pelo WhatsApp"}
-                </WhatsAppButton>
-              ) : (
-                <button className="btn btn-primary btn-lg" onClick={add} disabled={busy || !p.stock.available}>
-                  {p.stock.available ? "Adicionar ao carrinho" : "Sem estoque"} <Icon name={busy ? "loader" : "cartPlus"} className={busy ? "icon spin" : "icon"} />
-                </button>
-              )}
+              <button className="btn btn-primary btn-lg" onClick={add} disabled={busy || !p.stock.available}>
+                {p.stock.available ? "Adicionar ao carrinho" : "Sem estoque"} <Icon name={busy ? "loader" : "cartPlus"} className={busy ? "icon spin" : "icon"} />
+              </button>
             </div>
+            {/* Atalho para quem quer só este produto: abre a conversa já com produto e quantidade. */}
+            {wa.viaWhatsApp && wa.number && p.stock.available && (
+              <a className="btn btn-wa-line btn-block" target="_blank" rel="noreferrer"
+                href={wa.link(mode === "box"
+                  ? `Olá! Tenho interesse em compra para empresa (atacado): ${qty} ${qty > 1 ? "caixas" : "caixa"} de ${p.name} (cód. ${p.sku})`
+                  : productMessage(p, qty, qty > 1 ? `${p.retail.unitLabel}s` : p.retail.unitLabel))}>
+                <WhatsAppGlyph size={18} />{mode === "box" ? "Negociar pelo WhatsApp" : "Pedir só este pelo WhatsApp"}
+              </a>
+            )}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-              <span className="stock-note">{p.stock.available ? (wa.viaWhatsApp ? "Em estoque · o atendente confirma frete e entrega pelo CEP" : "Em estoque") : "Reposição em breve"}</span>
+              <span className="stock-note">{p.stock.available ? "Em estoque · frete refrigerado calculado pelo CEP" : "Reposição em breve"}</span>
               <button className="fav-link" aria-pressed={isFav} onClick={fav}><Icon name="heart" className="icon-sm" />{isFav ? "Salvo nos favoritos" : "Salvar nos favoritos"}</button>
             </div>
           </div>
+
+          {/* Selos: as dúvidas que seguram a compra, respondidas perto do botão. */}
+          <ul className="buy-trust" aria-label="Garantias">
+            <li><Icon name="snowflake" className="icon-sm" /><span><b>Entrega refrigerada</b><small>2 a 8 °C, da fazenda à sua porta</small></span></li>
+            <li><Icon name="farmer" className="icon-sm" /><span><b>Origem conhecida</b><small>{p.producer.name}, {p.producer.city}/{p.producer.state}</small></span></li>
+            <li><Icon name="shield" className="icon-sm" /><span><b>Pagamento seguro</b><small>Pix ou cartão, pela conversa</small></span></li>
+          </ul>
 
           {p.description && <p className="lead">{p.description}</p>}
           <dl className="spec">
@@ -122,6 +132,24 @@ export function ProductPage({ slug }: { slug: string }) {
           </dl>
 
           <div className="details">
+            {data.knowledge?.fabrication && (
+              <details open>
+                <summary>Como é feito</summary>
+                <div className="content"><p>{data.knowledge.fabrication}</p></div>
+              </details>
+            )}
+            {data.knowledge?.pairing && (
+              <details open={!data.knowledge.fabrication}>
+                <summary>Combina com</summary>
+                <div className="content"><p>{data.knowledge.pairing}</p></div>
+              </details>
+            )}
+            {data.knowledge?.storage && (
+              <details>
+                <summary>Como guardar</summary>
+                <div className="content"><p>{data.knowledge.storage}</p></div>
+              </details>
+            )}
             <details>
               <summary>Entrega refrigerada</summary>
               <div className="content">
@@ -161,10 +189,19 @@ export function ProductPage({ slug }: { slug: string }) {
         </div>
       </div>
 
+      {data.pairsWith.length > 0 && (
+        <section className="section-tight" aria-labelledby="leve-junto">
+          <div className="container">
+            <div className="section-head"><h2 id="leve-junto">Leve junto</h2><span className="aside muted">Mais pedidos com {p.category.name.toLowerCase()}</span></div>
+            <div className="product-grid">{data.pairsWith.map((r) => <ProductCard key={r.id} product={r} />)}</div>
+          </div>
+        </section>
+      )}
+
       {data.related.length > 0 && (
         <section className="section section-alt" aria-labelledby="relacionados">
           <div className="container">
-            <div className="section-head"><h2 id="relacionados">Você também pode gostar</h2></div>
+            <div className="section-head"><h2 id="relacionados">Da mesma linha</h2><Link to={`/produtos?categoria=${p.category.slug}`} className="link">Ver {p.category.name.toLowerCase()}</Link></div>
             <div className="product-grid">{data.related.map((r) => <ProductCard key={r.id} product={r} />)}</div>
           </div>
         </section>

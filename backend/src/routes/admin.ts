@@ -15,6 +15,7 @@ import { deleteRegion, listRegions, saveRegion } from "../repos/regions";
 import { analytics } from "../repos/analytics";
 import { notifyOrderStatus } from "../repos/conversations";
 import { applyMovement, inventoryOverview, ORDER_FILTERS, ordersBoard, productBatches, productMovements, transitionOrder } from "../repos/inventory";
+import { todayOverview } from "../repos/today";
 
 const tierSchema = z.object({
   minBoxes: z.number().int().min(1),
@@ -276,6 +277,29 @@ export const adminRoutes = new Hono<AppEnv>()
     return c.json({ order: await getOrder(orderId) });
   })
 
+  // Ações em massa: avança vários pedidos de uma vez (cada um avisa o cliente). Um erro não trava os outros.
+  .post("/orders/bulk-events", validate("json", z.object({
+    codes: z.array(z.string().min(3).max(40)).min(1).max(100),
+    status: orderStatusSchema.shape.status,
+    message: z.string().trim().min(1).max(300),
+  })), async (c) => {
+    const b = c.req.valid("json");
+    const results: { code: string; ok: boolean; error?: string }[] = [];
+    for (const code of b.codes) {
+      try {
+        const orderId = await transitionOrder(code, b.status, { message: b.message, userId: currentUser(c).id });
+        await notifyOrderStatus(orderId, b.status, b.message);
+        results.push({ code, ok: true });
+      } catch (e) {
+        results.push({ code, ok: false, error: e instanceof Error ? e.message : "erro" });
+      }
+    }
+    return c.json({ results });
+  })
+
+  // Tela "Hoje": o que precisa de ação agora, em um lugar só.
+  .get("/today", async (c) => c.json(await todayOverview()))
+
   // Estoque: físico x reservado x disponível, com cobertura dos pedidos abertos.
   .get("/inventory", async (c) => c.json(await inventoryOverview()))
 
@@ -298,6 +322,31 @@ export const adminRoutes = new Hono<AppEnv>()
       return applyMovement(tx, { productId, kind: b.kind, delta, note: b.note, userId: currentUser(c).id });
     });
     return c.json({ stockAfter, ...(await inventoryOverview()) }, 201);
+  })
+
+  // Contagem da câmara fria ou entrada de coleta de vários produtos de uma vez (tudo ou nada).
+  .post("/inventory/batch", validate("json", z.object({
+    kind: z.enum(["contagem", "entrada"]),
+    note: z.string().trim().max(300).optional(),
+    items: z.array(z.object({ productId: z.number().int().positive(), quantity: z.number().int().min(0).max(1_000_000), unit: z.enum(["unit", "box"]).default("unit") })).min(1).max(300),
+  })), async (c) => {
+    const b = c.req.valid("json");
+    const userId = currentUser(c).id;
+    const items = [...new Map(b.items.map((i) => [i.productId, i])).values()].sort((x, y) => x.productId - y.productId);
+    const changed = await db().begin(async (tx) => {
+      let n = 0;
+      for (const it of items) {
+        const [p] = await tx`select stock_units, box_size from products where id = ${it.productId} for update`;
+        if (!p) throw notFound("Produto");
+        const units = it.unit === "box" ? it.quantity * p.box_size : it.quantity;
+        const delta = b.kind === "contagem" ? units - p.stock_units : units;
+        if (b.kind === "entrada" && delta === 0) continue;
+        await applyMovement(tx, { productId: it.productId, kind: b.kind, delta, note: b.note ?? (b.kind === "contagem" ? "Contagem em lote" : "Entrada de coleta"), userId });
+        if (delta !== 0) n++;
+      }
+      return n;
+    });
+    return c.json({ changed, ...(await inventoryOverview()) }, 201);
   })
 
   .patch("/inventory/:productId", validate("json", z.object({ minStockUnits: z.number().int().min(0).max(100_000) })), async (c) => {

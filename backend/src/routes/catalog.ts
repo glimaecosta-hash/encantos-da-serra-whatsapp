@@ -6,6 +6,7 @@ import { normalize } from "../lib/text";
 import type { AppEnv } from "../lib/types";
 import { validate } from "../lib/validate";
 import { findProduct, listProducts, productSorts } from "../repos/products";
+import { botConfigFor } from "../repos/botCentral";
 
 const boolParam = z
   .enum(["true", "false", "1", "0"])
@@ -63,12 +64,24 @@ export const catalogRoutes = new Hono<AppEnv>()
     const [lot] = await db()`
       select code, title, produced_on::text as "producedOn", cure_days as "cureDays", notes
       from lots where product_id = ${product.id} order by produced_on desc limit 1`;
-    const related = await listProducts({ category: product.category.slug, pageSize: 5 });
+    const [related, bestSellers, config] = await Promise.all([
+      listProducts({ category: product.category.slug, pageSize: 5 }),
+      listProducts({ sort: "best_sellers", pageSize: 16 }),
+      botConfigFor(false),
+    ]);
+    // Ficha escrita pelos donos na Central do Robô (versão publicada). "Observações" são internas da venda.
+    const k = config.products[product.sku];
+    const knowledge = k && (k.fabrication || k.pairing || k.storage)
+      ? { fabrication: k.fabrication || null, pairing: k.pairing || null, storage: k.storage || null }
+      : null;
 
     return c.json({
       product,
       currentLot: lot ?? null,
+      knowledge,
       related: related.items.filter((p) => p.id !== product.id).slice(0, 4),
+      // "Leve junto": mais vendidos de outras linhas, com estoque (doce de leite com queijo, manteiga com pão…).
+      pairsWith: bestSellers.items.filter((p) => p.category.slug !== product.category.slug && p.stock.available).slice(0, 4),
     });
   })
 

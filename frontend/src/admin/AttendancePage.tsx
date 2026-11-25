@@ -5,9 +5,10 @@ import { Icon } from "../icons";
 import { Link, navigate, useLocation } from "../router";
 import { useApi, useDebounced, useStore } from "../store";
 import {
-  clock, dayHeader, firstName, initials, LOST_REASONS, QUICK_REPLIES, STAGE_INFO, TOPIC_LABEL, WaText, waited,
-  type ConversationDetail, type ConversationItem, type Counts, type Stage,
+  clock, dayHeader, firstName, initials, LOST_REASONS, QUICK_REPLIES, STAGE_INFO, TOPIC_LABEL, waited,
+  type ConversationDetail, type ConversationItem, type Counts, type Review, type Stage,
 } from "./attendance";
+import { ChatBubble, PendingBar, ReviewSection, TeachDialog } from "./attendanceReview";
 import { Dialog } from "./Dialog";
 import { fromCents, toCents, type AdminProduct } from "./types";
 
@@ -15,6 +16,7 @@ import { fromCents, toCents, type AdminProduct } from "./types";
 
 const VIEWS: { id: string; label: string; count?: keyof Counts; tone?: "alert" }[] = [
   { id: "attention", label: "Precisam de você", count: "attention", tone: "alert" },
+  { id: "approval", label: "Aprovar respostas", count: "approval", tone: "alert" },
   { id: "mine", label: "Minhas", count: "mine" },
   { id: "open", label: "Todas abertas", count: "open" },
   { id: "bot", label: "Com o chatbot", count: "bot" },
@@ -22,7 +24,8 @@ const VIEWS: { id: string; label: string; count?: keyof Counts; tone?: "alert" }
   { id: "closed", label: "Encerradas", count: "closed" },
 ];
 
-type ListResponse = { conversations: ConversationItem[]; counts: Counts; transport: string };
+type BotMode = { mode: "ia" | "regras"; model: string | null };
+type ListResponse = { conversations: ConversationItem[]; counts: Counts; transport: string; bot?: BotMode; supervised?: boolean };
 
 function useSelectedId(): number | null {
   const { search } = useLocation();
@@ -50,6 +53,15 @@ export function AttendancePage() {
 
   const counts = list.data?.counts;
   const conversations = list.data?.conversations ?? [];
+  const { toast } = useStore();
+  const supervised = !!list.data?.supervised;
+  const toggleSupervision = async () => {
+    try {
+      await api("/admin/atendimento/supervision", { method: "PUT", body: { supervised: !supervised } });
+      toast({ message: supervised ? "Modo supervisionado desligado: o robô responde sozinho." : "Modo supervisionado ligado: as respostas do robô esperam sua aprovação." });
+      list.reload();
+    } catch { toast({ message: "Não foi possível mudar o modo", kind: "error" }); }
+  };
 
   return (
     <div className="att" data-selected={!!selectedId}>
@@ -63,6 +75,18 @@ export function AttendancePage() {
             <Link to="/admin/simulador" className="att-sim-pill" title="As mensagens não saem para o WhatsApp real. Teste em Simulador.">
               <Icon name="phone" className="icon-sm" />Modo simulador
             </Link>
+          )}
+          {list.data?.bot && (
+            <span className="att-bot-pill" data-mode={list.data.bot.mode}
+              title={list.data.bot.mode === "ia" ? `Robô vendedor com IA (${list.data.bot.model}). Se a IA falhar, o robô de regras responde.` : "Robô de regras (menus numerados). Para ligar a IA, configure ANTHROPIC_API_KEY no backend."}>
+              <Icon name="sparkle" className="icon-sm" />{list.data.bot.mode === "ia" ? "Robô com IA" : "Robô de regras"}
+            </span>
+          )}
+          {list.data && (
+            <button className="rv-switch" role="switch" aria-checked={supervised} onClick={toggleSupervision}
+              title={supervised ? "As respostas do robô só saem depois que alguém aprova." : "Ligue para revisar cada resposta do robô antes de enviar."}>
+              <span className="rv-switch-track"><span /></span>Modo supervisionado
+            </button>
           )}
           <button className="btn btn-outline btn-sm" onClick={() => setShowGuide(true)}><Icon name="sparkle" className="icon-sm" />Como funciona</button>
           <button className="btn btn-outline btn-sm" onClick={() => setShowSettings(true)}><Icon name="sliders" className="icon-sm" />Configurações</button>
@@ -137,8 +161,10 @@ function ConversationRow({ c, active }: { c: ConversationItem; active: boolean }
             <small>{last ? clock(last.at) : ""}</small>
           </span>
           {c.businessName && <small className="att-biz">{c.businessName}</small>}
-          <span className="att-item-last">{last?.author === "system" ? <i>{last.body}</i> : <>{who}{last?.body.replace(/[*_]/g, "")}</>}</span>
+          <span className="att-item-last">{last?.author === "system" ? <i>{last.body}</i> : <>{last?.status === "pending" ? "⏳ " : who}{last?.body.replace(/[*_]/g, "")}</>}</span>
           <span className="att-item-tags">
+            {c.pendingApproval > 0 && <span className="rv-tag pending">Aprovar {c.pendingApproval > 1 ? `${c.pendingApproval} respostas` : "resposta"}</span>}
+            {c.review === "problema" && <span className="rv-tag">⚠ Problema</span>}
             <span className="att-stage" data-stage={c.stage}>{STAGE_INFO[c.stage].short}</span>
             <span className="att-topic" data-topic={c.topic}>{TOPIC_LABEL[c.topic]}</span>
             {c.stage === "waiting" && c.waitingSince && <span className="att-wait"><Icon name="clock" className="icon-sm" />{waited(c.waitingSince)}</span>}
@@ -162,6 +188,7 @@ function ConversationPane({ id, onChanged }: { id: number; onChanged: () => void
   const [orderOpen, setOrderOpen] = useState(false);
   const [lostOpen, setLostOpen] = useState(false);
   const [sideOpen, setSideOpen] = useState(false);
+  const [teach, setTeach] = useState<{ question: string; answer: string } | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const lastCount = useRef(0);
 
@@ -219,6 +246,16 @@ function ConversationPane({ id, onChanged }: { id: number; onChanged: () => void
     if (ok) setText("");
   };
 
+  // Para "ensinar ao robô": a última mensagem do cliente antes de cada resposta.
+  const prevCustomer = new Map<number, string>();
+  let lastCustomer = "";
+  for (const m of data.messages) {
+    prevCustomer.set(m.id, lastCustomer);
+    if (m.author === "customer") lastCustomer = m.body;
+  }
+  const pendingCount = data.messages.filter((m) => m.status === "pending").length;
+  const runAction = (path: string, body: unknown, ok?: string) => run(path, body, ok);
+
   const groups: { day: string; items: ConversationDetail["messages"] }[] = [];
   for (const m of data.messages) {
     const day = dayHeader(m.createdAt);
@@ -269,7 +306,7 @@ function ConversationPane({ id, onChanged }: { id: number; onChanged: () => void
         {closed && (
           <div className="att-closed-bar">
             <Icon name={c.stage === "won" ? "checkCircle" : "x"} className="icon-sm" />
-            {c.stage === "won" ? <>Conversa encerrada com o pedido <Link to={`/admin?q=${c.orderCode}`}><b>{c.orderCode}</b></Link>.</> : <>Encerrada sem pedido — {c.lostReason}.</>}
+            {c.stage === "won" ? <>Conversa encerrada com o pedido <Link to={`/admin/pedidos?q=${c.orderCode}`}><b>{c.orderCode}</b></Link>.</> : <>Encerrada sem pedido — {c.lostReason}.</>}
             <span className="adm-muted"> Se o cliente escrever de novo, abre uma nova conversa.</span>
           </div>
         )}
@@ -281,21 +318,13 @@ function ConversationPane({ id, onChanged }: { id: number; onChanged: () => void
               {g.items.map((m) => (
                 m.author === "system"
                   ? <div key={m.id} className="att-sys"><span>{m.body}</span></div>
-                  : (
-                    <div key={m.id} className="att-msg" data-author={m.author}>
-                      <div className="att-bubble">
-                        {m.author !== "customer" && (
-                          <span className="att-msg-who">{m.author === "bot" ? "🤖 Chatbot" : m.author === "note" ? `📝 Nota interna · ${m.agentName ?? ""}` : m.agentName ?? "Responsável"}</span>
-                        )}
-                        <WaText text={m.body} />
-                        <time>{clock(m.createdAt)}</time>
-                      </div>
-                    </div>
-                  )
+                  : <ChatBubble key={m.id} m={m} prevCustomer={prevCustomer.get(m.id) ?? ""} run={runAction} busy={busy} onTeach={(question, answer) => setTeach({ question, answer })} />
               ))}
             </div>
           ))}
         </div>
+
+        {!closed && <PendingBar count={pendingCount} run={runAction} busy={busy} />}
 
         {!closed && (
           <div className="att-composer" data-mode={mode}>
@@ -327,7 +356,9 @@ function ConversationPane({ id, onChanged }: { id: number; onChanged: () => void
         )}
       </section>
 
-      <ClientPanel data={data} open={sideOpen} onClose={() => setSideOpen(false)} onSave={(body) => patch("/contact", body, "Ficha do cliente salva.")} onUseCart={() => setOrderOpen(true)} />
+      <ClientPanel data={data} open={sideOpen} onClose={() => setSideOpen(false)} onSave={(body) => patch("/contact", body, "Ficha do cliente salva.")} onUseCart={() => setOrderOpen(true)}
+        onReview={(review, note) => patch("/review", { review, note }, review ? "Conversa validada." : "Validação removida.")} />
+      <TeachDialog open={!!teach} initial={teach} onClose={() => setTeach(null)} />
 
       <OrderDialog open={orderOpen} onClose={() => setOrderOpen(false)} detail={data} onDone={(d) => { setData(d); onChanged(); setOrderOpen(false); }} />
       <LostDialog open={lostOpen} onClose={() => setLostOpen(false)} onConfirm={async (reason) => { if (await patch("/stage", { stage: "lost", lostReason: reason }, "Conversa encerrada.")) setLostOpen(false); }} />
@@ -337,7 +368,7 @@ function ConversationPane({ id, onChanged }: { id: number; onChanged: () => void
 
 // ---------------- Ficha do cliente ----------------
 
-function ClientPanel({ data, open, onClose, onSave, onUseCart }: { data: ConversationDetail; open: boolean; onClose: () => void; onSave: (b: { name?: string; businessName: string | null; notes: string | null }) => Promise<boolean>; onUseCart: () => void }) {
+function ClientPanel({ data, open, onClose, onSave, onUseCart, onReview }: { data: ConversationDetail; open: boolean; onClose: () => void; onSave: (b: { name?: string; businessName: string | null; notes: string | null }) => Promise<boolean>; onUseCart: () => void; onReview: (review: Review | null, note?: string) => Promise<boolean> }) {
   const c = data.conversation;
   const [name, setName] = useState(c.name ?? "");
   const [biz, setBiz] = useState(c.businessName ?? "");
@@ -360,6 +391,8 @@ function ClientPanel({ data, open, onClose, onSave, onUseCart }: { data: Convers
         {dirty && <button className="btn btn-primary btn-sm" onClick={() => onSave({ name: name.trim() || undefined, businessName: biz.trim() || null, notes: notes.trim() || null })}>Salvar ficha</button>}
       </section>
 
+      <ReviewSection detail={data} onSave={onReview} />
+
       <section className="att-side-sec">
         <h3>Carrinho montado no chatbot</h3>
         {cart.length === 0 ? <p className="adm-muted att-small">Vazio.</p> : (
@@ -378,7 +411,7 @@ function ClientPanel({ data, open, onClose, onSave, onUseCart }: { data: Convers
           <ul className="att-orders">
             {data.orders.map((o) => (
               <li key={o.code}>
-                <Link to={`/admin?q=${o.code}`}><b>{o.code}</b></Link>
+                <Link to={`/admin/pedidos?q=${o.code}`}><b>{o.code}</b></Link>
                 <span className="status" data-status={o.status}>{STATUS_LABEL[o.status]}</span>
                 <small className="adm-muted">{shortDate(o.createdAt)} · {brl(o.totalCents)}{o.discountCents ? ` (−${brl(o.discountCents)})` : ""}</small>
               </li>
@@ -641,7 +674,7 @@ function GuideDialog({ open, onClose }: { open: boolean; onClose: () => void }) 
 
 function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { toast } = useStore();
-  const { data } = useApi<{ settings: { number: string; displayNumber: string; hours: string }; transport: string }>(open ? "/admin/atendimento/settings" : null);
+  const { data } = useApi<{ settings: { number: string; displayNumber: string; hours: string }; transport: string; bot?: BotMode }>(open ? "/admin/atendimento/settings" : null);
   const [form, setForm] = useState({ number: "", displayNumber: "", hours: "" });
   const [saving, setSaving] = useState(false);
   useEffect(() => { if (data) setForm(data.settings); }, [data]);
@@ -664,6 +697,12 @@ function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void 
         <div className="adm-alert" style={{ margin: 0 }}>
           <Icon name="phone" />
           <span><b>Conexão: {data?.transport === "simulador" ? "modo simulador" : data?.transport ?? "…"}</b> As respostas ficam registradas no painel e podem ser testadas em Simulador. Para enviar ao WhatsApp real, é preciso ligar a API oficial (veja o README).</span>
+        </div>
+        <div className="adm-alert" style={{ margin: 0 }}>
+          <Icon name="sparkle" />
+          {data?.bot?.mode === "ia"
+            ? <span><b>Robô: vendedor com IA ({data.bot.model})</b> Entende frases livres, explica os produtos e conduz a venda. Preço, estoque, frete e fechamento do pedido passam sempre pelo sistema. Se a IA falhar, o robô de regras responde.</span>
+            : <span><b>Robô: regras (menus numerados)</b> Para ligar o vendedor com IA, coloque a chave <code>ANTHROPIC_API_KEY</code> no <code>backend/.env</code> e reinicie o servidor.</span>}
         </div>
         <div className="adm-form-actions">
           <button className="btn btn-outline btn-sm" onClick={onClose}>Cancelar</button>

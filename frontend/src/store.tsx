@@ -24,6 +24,9 @@ type Store = {
   setCartQty: (productId: number, mode: "unit" | "box", quantity: number) => Promise<void>;
   refreshCart: () => Promise<void>;
   clearCartToken: () => void;
+  // Carrinho lateral, aberto ao adicionar um produto.
+  cartOpen: boolean;
+  setCartOpen: (open: boolean) => void;
   favorites: Set<number>;
   toggleFavorite: (productId: number) => Promise<boolean>;
   toasts: Toast[];
@@ -37,6 +40,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
   const [cart, setCart] = useState<Cart | null>(null);
+  const [cartOpen, setCartOpen] = useState(false);
   const [favorites, setFavorites] = useState<Set<number>>(new Set());
   const [toasts, setToasts] = useState<Toast[]>([]);
 
@@ -123,9 +127,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const cartCount = cart?.lines.reduce((acc, l) => acc + l.quantity, 0) ?? 0;
 
   const value = useMemo<Store>(() => ({
-    user, ready, login, logout, cart, cartCount, addToCart, setCartQty, refreshCart, clearCartToken,
+    user, ready, login, logout, cart, cartCount, addToCart, setCartQty, refreshCart, clearCartToken, cartOpen, setCartOpen,
     favorites, toggleFavorite, toasts, toast, dismiss,
-  }), [user, ready, login, logout, cart, cartCount, addToCart, setCartQty, refreshCart, clearCartToken, favorites, toggleFavorite, toasts, toast, dismiss]);
+  }), [user, ready, login, logout, cart, cartCount, addToCart, setCartQty, refreshCart, clearCartToken, cartOpen, favorites, toggleFavorite, toasts, toast, dismiss]);
 
   return <StoreContext value={value}>{children}</StoreContext>;
 }

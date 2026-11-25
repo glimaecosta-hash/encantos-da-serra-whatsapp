@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { AdminApp } from "./admin/AdminApp";
+import { CartBar, CartDrawer } from "./components/CartDrawer";
 import { CookieBanner, Toasts } from "./components/Chrome";
 import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
@@ -70,7 +71,9 @@ function Shell() {
       <main id="conteudo" tabIndex={-1}><Routes /></main>
       <Footer />
       <Toasts />
+      <CartBar />
       <WhatsAppFloat />
+      <CartDrawer />
       <CookieBanner />
     </>
   );

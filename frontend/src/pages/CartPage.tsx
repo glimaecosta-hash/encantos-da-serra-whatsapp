@@ -5,40 +5,16 @@ import { brl, cepMask, shortDate } from "../format";
 import { Icon } from "../icons";
 import { Link, navigate } from "../router";
 import { useStore } from "../store";
-import { HowToBuy, useWhatsApp, WhatsAppButton } from "../whatsapp";
+import { lineDetail } from "../components/CartDrawer";
+import { LeveJunto } from "../components/Suggestions";
+import { cartMessage, HowToBuy, useWhatsApp, WhatsAppButton } from "../whatsapp";
 
 const EMPTY_ADDRESS = { recipient: "", street: "", number: "", complement: "", district: "", city: "", state: "" };
 
-// Com a venda pelo WhatsApp, /carrinho explica o novo jeito de comprar (links antigos não quebram).
-export function CartPage() {
-  const wa = useWhatsApp();
-  useEffect(() => { if (wa.viaWhatsApp) document.title = "Como comprar · Encantos da Serra"; }, [wa.viaWhatsApp]);
-  if (!wa.viaWhatsApp) return <CartCheckout />;
-  return (
-    <div className="container" style={{ padding: "48px 16px 96px", maxWidth: 1040 }}>
-      <HowToBuy />
-      <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap", marginTop: 8 }}>
-        <Link to="/produtos" className="btn btn-outline">Ver produtos <Icon name="arrowRight" className="icon-sm" /></Link>
-        <Link to="/rastrear" className="btn btn-outline">Rastrear um pedido</Link>
-      </div>
-      {wa.number && <p className="muted" style={{ textAlign: "center", marginTop: 16 }}>Já é cliente de atacado? <WhatsAppButton href={wa.link("Olá! Tenho interesse em compra para empresa (atacado).")} className="btn-sm">Falar com o comercial</WhatsAppButton></p>}
-    </div>
-  );
-}
-
-function CartCheckout() {
-  const { cart, setCartQty, refreshCart, user, toast } = useStore();
-  const [cep, setCep] = useState("");
+// Região, frete e próxima rota para o CEP digitado.
+function useCepQuote(cep: string) {
   const [delivery, setDelivery] = useState<DeliveryInfo | null>(null);
   const [cepError, setCepError] = useState<string | null>(null);
-  const [address, setAddress] = useState(EMPTY_ADDRESS);
-  const [errors, setErrors] = useState<Record<string, string>>({});
-  const [placing, setPlacing] = useState(false);
-  const [placed, setPlaced] = useState<Order | null>(null);
-
-  useEffect(() => { document.title = "Carrinho · Encantos da Serra"; refreshCart(); }, [refreshCart]);
-  useEffect(() => { if (user && !address.recipient) setAddress((a) => ({ ...a, recipient: user.name })); }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
-
   useEffect(() => {
     const digits = cep.replace(/\D/g, "");
     if (digits.length !== 8) { setDelivery(null); setCepError(null); return; }
@@ -48,6 +24,153 @@ function CartCheckout() {
       .catch((e) => { if (alive) { setDelivery(null); setCepError(e instanceof ApiError ? e.message : "Falha ao consultar CEP"); } });
     return () => { alive = false; };
   }, [cep]);
+  return { delivery, cepError };
+}
+
+const shippingFor = (delivery: DeliveryInfo | null, subtotal: number) =>
+  delivery ? (delivery.freeShippingOverCents !== null && subtotal >= delivery.freeShippingOverCents ? 0 : delivery.feeCents) : null;
+
+function CartLines() {
+  const { cart, setCartQty } = useStore();
+  return (
+    <div className="card" style={{ padding: "4px 20px" }}>
+      {(cart?.lines ?? []).map((l) => (
+        <div key={l.itemId} className="cart-line">
+          {l.product.imageUrl ? <img src={l.product.imageUrl} alt="" /> : <span />}
+          <div>
+            <small>{l.product.producerName}</small>
+            <h3><Link to={`/produtos/${l.product.slug}`}>{l.product.name}</Link></h3>
+            <small>{lineDetail(l)}</small>
+            {l.savingsCents > 0 && <small style={{ color: "var(--green-700)" }}>Economia de {brl(l.savingsCents)} na faixa</small>}
+            {l.issue && <span className="issue">Estoque insuficiente — disponível: {l.availableUnits} un</span>}
+          </div>
+          <div className="right">
+            <b style={{ fontFamily: "var(--serif)", fontSize: 19, fontWeight: 500 }}>{brl(l.totalCents)}</b>
+            <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+              <Stepper value={l.quantity} min={1} onChange={(v) => setCartQty(l.product.id, l.mode, v)} label={`Quantidade de ${l.product.name}`} />
+              <button className="remove-btn" aria-label={`Remover ${l.product.name}`} onClick={() => setCartQty(l.product.id, l.mode, 0)}><Icon name="trash" className="icon-sm" /></button>
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function EmptyCart() {
+  return (
+    <div className="container" style={{ paddingBottom: 96 }}>
+      <div className="card empty">
+        <h3>Seu carrinho está vazio</h3>
+        <p>Que tal começar pelos destaques da estação?</p>
+        <Link to="/produtos" className="btn btn-primary">Explorar produtos <Icon name="arrowRight" className="icon-sm" /></Link>
+      </div>
+    </div>
+  );
+}
+
+export function CartPage() {
+  const wa = useWhatsApp();
+  return wa.viaWhatsApp ? <CartWhatsApp /> : <CartCheckout />;
+}
+
+// Venda pelo WhatsApp: o cliente monta o carrinho aqui e fecha na conversa, sem cadastro.
+// O CEP é opcional: se informado, já mostra o frete e vai junto na mensagem.
+function CartWhatsApp() {
+  const { cart, refreshCart, clearCartToken } = useStore();
+  const wa = useWhatsApp();
+  const [cep, setCep] = useState("");
+  const [sent, setSent] = useState(false);
+  const { delivery, cepError } = useCepQuote(cep);
+
+  useEffect(() => { document.title = "Carrinho · Encantos da Serra"; refreshCart(); }, [refreshCart]);
+
+  const lines = cart?.lines ?? [];
+  const subtotal = cart?.totals.subtotalCents ?? 0;
+  const shipping = shippingFor(delivery, subtotal);
+  const freeOver = delivery?.freeShippingOverCents ?? null;
+  const missing = freeOver !== null ? Math.max(0, freeOver - subtotal) : 0;
+  const hasBox = lines.some((l) => l.mode === "box");
+
+  return (
+    <>
+      <div className="container page-head">
+        <nav className="breadcrumb"><Link to="/">Início</Link><span>/</span><span>Carrinho</span></nav>
+        <h1>Seu carrinho</h1>
+        <p className="muted">Monte seu pedido aqui e finalize pelo WhatsApp, sem cadastro.</p>
+      </div>
+      {lines.length === 0 ? <EmptyCart /> : (
+        <div className="container cart-layout">
+          <div>
+            <CartLines />
+            <div className="card" style={{ padding: "20px 24px", marginTop: 20 }}><LeveJunto limit={4} /></div>
+            <div className="card" style={{ padding: 24, marginTop: 20 }}>
+              <h3 style={{ fontSize: 22, marginBottom: 4 }}>Entrega refrigerada</h3>
+              <p className="muted" style={{ margin: "0 0 14px", fontSize: 15 }}>Opcional: informe o CEP para ver o frete agora. Se preferir, o atendente calcula na conversa.</p>
+              <div className="form-grid">
+                <label className="field" data-error={!!cepError}>
+                  <span>CEP</span>
+                  <input className="input" value={cep} inputMode="numeric" placeholder="00000-000" autoComplete="postal-code" onChange={(e) => setCep(cepMask(e.target.value))} />
+                  {cepError && <small className="error">{cepError}</small>}
+                </label>
+                <div className="span-2" style={{ alignSelf: "end" }}>
+                  {delivery && (
+                    <div className="notice ok">
+                      <b>{delivery.region}</b> — rota de {delivery.nextDelivery?.weekday}, {delivery.nextDelivery ? shortDate(delivery.nextDelivery.date) : "a confirmar"} • frete {shipping === 0 ? "grátis" : brl(delivery.feeCents)}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <aside className="card summary">
+            <h3 style={{ fontSize: 22 }}>Resumo</h3>
+            <div className="summary-row"><span>Subtotal ({cart?.totals.units} un)</span><span>{brl(subtotal)}</span></div>
+            {(cart?.totals.savingsCents ?? 0) > 0 && <div className="summary-row" style={{ color: "var(--green-700)" }}><span>Economia no atacado</span><span>−{brl(cart!.totals.savingsCents)}</span></div>}
+            <div className="summary-row"><span>Frete refrigerado</span><span>{shipping === null ? "pelo CEP" : shipping === 0 ? "Grátis" : brl(shipping)}</span></div>
+            {freeOver !== null && (
+              <div className="free-ship">
+                {missing > 0
+                  ? <span>Faltam <b>{brl(missing)}</b> para frete grátis em {delivery!.region}.</span>
+                  : <span style={{ color: "#17784f" }}><b>Frete grátis</b> garantido para {delivery!.region}!</span>}
+                <span className="free-ship-bar" aria-hidden="true"><span style={{ width: `${Math.min(100, (subtotal / freeOver) * 100)}%` }} /></span>
+              </div>
+            )}
+            <div className="summary-row total"><span>Total</span><b>{brl(subtotal + (shipping ?? 0))}</b></div>
+            {cart?.hasIssues && <div className="notice error">Ajuste as quantidades sem estoque para continuar.</div>}
+            {hasBox && <div className="notice">Itens por caixa seguem para o nosso comercial, que confirma o preço por faixa.</div>}
+            <WhatsAppButton className="btn-lg btn-block" href={cart ? wa.link(cartMessage(cart, delivery ? cep : undefined)) : "#"}
+              disabled={!wa.number || !!cart?.hasIssues} onClick={() => setSent(true)}>
+              Finalizar pelo WhatsApp
+            </WhatsAppButton>
+            {!wa.number && <small className="muted">O número do WhatsApp ainda não foi configurado no painel.</small>}
+            <small className="muted" style={{ display: "flex", gap: 8, alignItems: "center" }}><Icon name="shield" className="icon-sm" />O pedido chega pronto na conversa. Confirmamos frete, endereço e pagamento por lá.</small>
+            {sent && (
+              <div className="notice ok cart-sent" role="status">
+                <span>Abrimos o WhatsApp com o seu pedido. Já enviou a mensagem?</span>
+                <button className="btn btn-outline btn-sm" onClick={() => { clearCartToken(); setSent(false); }}>Sim, esvaziar carrinho</button>
+              </div>
+            )}
+          </aside>
+        </div>
+      )}
+      <div className="container" style={{ paddingBottom: 64 }}><HowToBuy compact /></div>
+    </>
+  );
+}
+
+function CartCheckout() {
+  const { cart, refreshCart, user, toast } = useStore();
+  const [cep, setCep] = useState("");
+  const { delivery, cepError } = useCepQuote(cep);
+  const [address, setAddress] = useState(EMPTY_ADDRESS);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [placing, setPlacing] = useState(false);
+  const [placed, setPlaced] = useState<Order | null>(null);
+
+  useEffect(() => { document.title = "Carrinho · Encantos da Serra"; refreshCart(); }, [refreshCart]);
+  useEffect(() => { if (user && !address.recipient) setAddress((a) => ({ ...a, recipient: user.name })); }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (placed) {
     return (
@@ -69,7 +192,7 @@ function CartCheckout() {
 
   const lines = cart?.lines ?? [];
   const subtotal = cart?.totals.subtotalCents ?? 0;
-  const shipping = delivery ? (delivery.freeShippingOverCents !== null && subtotal >= delivery.freeShippingOverCents ? 0 : delivery.feeCents) : null;
+  const shipping = shippingFor(delivery, subtotal);
   const hasBox = lines.some((l) => l.mode === "box");
   const isB2B = user?.role === "business" || user?.role === "admin";
 
@@ -114,38 +237,10 @@ function CartCheckout() {
         <h1>Seu carrinho</h1>
         {user && <p><Link to="/pedidos" style={{ textDecoration: "underline" }}>Ver meus pedidos anteriores</Link></p>}
       </div>
-      {lines.length === 0 ? (
-        <div className="container" style={{ paddingBottom: 96 }}>
-          <div className="card empty">
-            <h3>Seu carrinho está vazio</h3>
-            <p>Que tal começar pelos destaques da estação?</p>
-            <Link to="/produtos" className="btn btn-primary">Explorar catálogo <Icon name="arrowRight" className="icon-sm" /></Link>
-          </div>
-        </div>
-      ) : (
+      {lines.length === 0 ? <EmptyCart /> : (
         <div className="container cart-layout">
           <div>
-            <div className="card" style={{ padding: "4px 20px" }}>
-              {lines.map((l) => (
-                <div key={l.itemId} className="cart-line">
-                  {l.product.imageUrl ? <img src={l.product.imageUrl} alt="" /> : <span />}
-                  <div>
-                    <small>{l.product.producerName}</small>
-                    <h3><Link to={`/produtos/${l.product.slug}`}>{l.product.name}</Link></h3>
-                    <small>{l.mode === "box" ? `${l.product.boxLabel} • ${l.units} un a ${brl(l.unitPriceCents)}` : `${brl(l.unitPriceCents)} por ${l.product.unitLabel}`}</small>
-                    {l.savingsCents > 0 && <small style={{ color: "var(--green-700)" }}>Economia de {brl(l.savingsCents)} na faixa</small>}
-                    {l.issue && <span className="issue">Estoque insuficiente — disponível: {l.availableUnits} un</span>}
-                  </div>
-                  <div className="right">
-                    <b style={{ fontFamily: "var(--serif)", fontSize: 19, fontWeight: 500 }}>{brl(l.totalCents)}</b>
-                    <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                      <Stepper value={l.quantity} min={1} onChange={(v) => setCartQty(l.product.id, l.mode, v)} label={`Quantidade de ${l.product.name}`} />
-                      <button className="remove-btn" aria-label={`Remover ${l.product.name}`} onClick={() => setCartQty(l.product.id, l.mode, 0)}><Icon name="trash" className="icon-sm" /></button>
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
+            <CartLines />
 
             <div className="card" style={{ padding: 24, marginTop: 20 }}>
               <h3 style={{ fontSize: 22, marginBottom: 16 }}>Entrega refrigerada</h3>

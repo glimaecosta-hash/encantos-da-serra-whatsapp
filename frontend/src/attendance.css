@@ -18,6 +18,8 @@ a.adm-chan[data-chan="whatsapp"]:hover { text-decoration: underline; }
 
 /* ---------- Cabeçalho e funil ---------- */
 .att-head-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.att-bot-pill { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 999px; font-size: 12.5px; font-weight: 600; background: var(--cream-2); border: 1px solid var(--line-strong); color: var(--ink-2); cursor: help; }
+.att-bot-pill[data-mode="ia"] { background: #eef7f2; border-color: #9fd0b6; color: #17784f; }
 .att-sim-pill { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: 999px; background: var(--gold-soft); border: 1px solid var(--gold-line); color: #6d5410; font-size: 12.5px; font-weight: 600; }
 .att-funnel { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
 .att-funnel-step {

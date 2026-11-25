@@ -5,6 +5,8 @@ import { Icon, type IconName } from "../icons";
 import { Link, useLocation } from "../router";
 import { useApi, useDebounced, useStore } from "../store";
 import { Dialog } from "./Dialog";
+import { OrderPayment, PaymentSettingsDialog } from "./payments";
+import { BulkBar, printPickingList } from "./ordersBulk";
 import { NEXT_ACTION, NEXT_MESSAGE, timeAgo, type Board, type BoardOrder, type Coverage } from "./types";
 
 const FILTERS = [
@@ -57,6 +59,9 @@ export function OrdersPage() {
   const [temperature, setTemperature] = useState("4.0");
   const [saving, setSaving] = useState(false);
   const [updatedAt, setUpdatedAt] = useState(new Date());
+  const [showPayments, setShowPayments] = useState(false);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  useEffect(() => setSelected(new Set()), [filter, term]);
 
   useEffect(() => { if (data) setUpdatedAt(new Date()); }, [data]);
 
@@ -93,6 +98,11 @@ export function OrdersPage() {
 
   const s = data?.summary;
   const orders = data?.orders ?? [];
+  const selectedOrders = orders.filter((o) => selected.has(o.id));
+  const toggle = (id: number) => setSelected((cur) => { const n = new Set(cur); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const allSelected = orders.length > 0 && orders.every((o) => selected.has(o.id));
+  // Lista de separação do dia: pedidos pagos ou em separação (os selecionados, se houver).
+  const toPick = orders.filter((o) => o.status === "confirmed" || o.status === "preparing");
 
   return (
     <>
@@ -101,11 +111,19 @@ export function OrdersPage() {
           <h1>Pedidos</h1>
           <p>Cobertura calculada sobre o estoque físico, por ordem de chegada: o pedido mais antigo tem prioridade.</p>
         </div>
-        <button className="btn btn-outline btn-sm" onClick={reload} disabled={loading}>
-          <Icon name={loading ? "loader" : "route"} className={loading ? "icon-sm spin" : "icon-sm"} />Atualizar
-          <span className="adm-muted" style={{ fontWeight: 400 }}>· {updatedAt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}</span>
-        </button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn btn-outline btn-sm" disabled={!toPick.length} title={toPick.length ? "Pedidos pagos e em separação, agrupados por rota" : "Nenhum pedido para separar neste filtro"}
+            onClick={() => { if (!printPickingList(toPick)) toast({ message: "Permita pop-ups para abrir a lista de separação.", kind: "error" }); }}>
+            <Icon name="receipt" className="icon-sm" />Lista de separação{toPick.length ? ` (${toPick.length})` : ""}
+          </button>
+          <button className="btn btn-outline btn-sm" onClick={() => setShowPayments(true)}><Icon name="dollar" className="icon-sm" />Pagamentos</button>
+          <button className="btn btn-outline btn-sm" onClick={reload} disabled={loading}>
+            <Icon name={loading ? "loader" : "route"} className={loading ? "icon-sm spin" : "icon-sm"} />Atualizar
+            <span className="adm-muted" style={{ fontWeight: 400 }}>· {updatedAt.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}</span>
+          </button>
+        </div>
       </div>
+      <PaymentSettingsDialog open={showPayments} onClose={() => setShowPayments(false)} />
 
       <div className="adm-kpis">
         <Kpi icon="dollar" label="Total de vendas" value={s ? brl(s.salesCents) : "–"}
@@ -131,11 +149,14 @@ export function OrdersPage() {
         </label>
       </div>
 
+      <BulkBar selected={selectedOrders} onClear={() => setSelected(new Set())} onDone={() => { setSelected(new Set()); reload(); }} />
+
       <div className="adm-card">
         <div className="adm-table-wrap">
           <table className="adm-table">
             <thead>
               <tr>
+                <th className="sel-col"><input type="checkbox" aria-label="Selecionar todos" checked={allSelected} onChange={() => setSelected(allSelected ? new Set() : new Set(orders.map((o) => o.id)))} /></th>
                 <th>Pedido</th>
                 <th>Cliente</th>
                 <th>Itens</th>
@@ -148,10 +169,10 @@ export function OrdersPage() {
             </thead>
             <tbody>
               {loading && !data && (
-                <tr><td colSpan={8}><div className="skeleton" style={{ height: 160 }} /></td></tr>
+                <tr><td colSpan={9}><div className="skeleton" style={{ height: 160 }} /></td></tr>
               )}
               {!loading && orders.length === 0 && (
-                <tr><td colSpan={8} className="adm-empty">
+                <tr><td colSpan={9} className="adm-empty">
                   {filter === "uncovered" ? "Nenhum pedido sem cobertura. O estoque físico atende todos os pedidos abertos." : "Nenhum pedido neste filtro."}
                 </td></tr>
               )}
@@ -160,7 +181,10 @@ export function OrdersPage() {
                 const next = o.nextStatuses.find((st) => st !== "cancelled");
                 return (
                   <Fragment key={o.id}>
-                    <tr className="adm-row" data-cov={o.coverage ?? undefined} data-expanded={isOpen} onClick={() => setExpanded(isOpen ? null : o.id)}>
+                    <tr className="adm-row" data-cov={o.coverage ?? undefined} data-expanded={isOpen} data-selected={selected.has(o.id) || undefined} onClick={() => setExpanded(isOpen ? null : o.id)}>
+                      <td className="sel-col" onClick={(e) => e.stopPropagation()}>
+                        <input type="checkbox" aria-label={`Selecionar ${o.code}`} checked={selected.has(o.id)} onChange={() => toggle(o.id)} />
+                      </td>
                       <td>
                         <button className="adm-expand" aria-expanded={isOpen} aria-label={`Detalhes de ${o.code}`} onClick={(e) => { e.stopPropagation(); setExpanded(isOpen ? null : o.id); }}>
                           <Icon name="arrowRight" className="icon-sm" />
@@ -205,8 +229,8 @@ export function OrdersPage() {
                     </tr>
                     {isOpen && (
                       <tr className="adm-detail-row">
-                        <td colSpan={8}>
-                          <OrderDetail order={o} onAction={(to) => open(o, to)} />
+                        <td colSpan={9}>
+                          <OrderDetail order={o} onAction={(to) => open(o, to)} onChanged={reload} />
                         </td>
                       </tr>
                     )}
@@ -266,7 +290,7 @@ export function OrdersPage() {
   );
 }
 
-function OrderDetail({ order: o, onAction }: { order: BoardOrder; onAction: (to: string) => void }) {
+function OrderDetail({ order: o, onAction, onChanged }: { order: BoardOrder; onAction: (to: string) => void; onChanged: () => void }) {
   return (
     <div className="adm-detail">
       <div>
@@ -315,6 +339,7 @@ function OrderDetail({ order: o, onAction }: { order: BoardOrder; onAction: (to:
           <dt>Rota prevista</dt><dd>{o.scheduledDelivery ? shortDate(o.scheduledDelivery) : "—"}{o.deliveryChangedAt && <> · <b className="adm-changed-inline">alterada em {dateTime(o.deliveryChangedAt)}</b></>}</dd>
           <dt>Recebido em</dt><dd>{dateTime(o.createdAt)}</dd>
         </dl>
+        <OrderPayment code={o.code} status={o.status} hasWhatsApp={!!o.customerPhone} onChanged={onChanged} />
         {o.nextStatuses.includes("cancelled") && (
           <button className="btn btn-sm adm-btn-ghost-danger" onClick={() => onAction("cancelled")}>
             <Icon name="x" className="icon-sm" />Cancelar pedido

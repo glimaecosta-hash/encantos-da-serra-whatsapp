@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { BrandMark, Icon } from "../icons";
+import { BrandMark, Icon, type IconName } from "../icons";
+import { TodayPage } from "./TodayPage";
 import { Link, matchPath, navigate, useLocation } from "../router";
 import { useApi, useStore } from "../store";
 import { DashboardPage } from "./DashboardPage";
@@ -12,23 +13,41 @@ import { RoutesPage } from "./RoutesPage";
 import { AttendancePage } from "./AttendancePage";
 import { RequestsPage } from "./RequestsPage";
 import { SimulatorPage } from "./SimulatorPage";
+import { BotPage } from "./BotPage";
 
-// Ordem pensada para o dia a dia: números, quem está esperando resposta, pedidos e depois o cadastro.
-const TABS = [
-  { to: "/admin/dashboard", label: "Dashboard", icon: "trending" as const },
-  { to: "/admin/atendimento", label: "Atendimento", icon: "chat" as const, badge: "attention" as const },
-  { to: "/admin", label: "Pedidos", icon: "receipt" as const },
-  { to: "/admin/estoque", label: "Estoque", icon: "boxes" as const },
-  { to: "/admin/produtos", label: "Produtos", icon: "layers" as const },
-  { to: "/admin/rotas", label: "Rotas", icon: "truck" as const },
-  { to: "/admin/solicitacoes", label: "Solicitações", icon: "mail" as const, badge: "requests" as const },
-  { to: "/admin/simulador", label: "Simulador", icon: "phone" as const },
+type Tab = { to: string; label: string; icon: IconName; badge?: "attention" | "requests" };
+
+// Menu agrupado pelo jeito que o dia acontece: o que fazer hoje, vender, operar, cadastrar e acompanhar.
+const GROUPS: { label: string | null; tabs: Tab[] }[] = [
+  { label: null, tabs: [{ to: "/admin/hoje", label: "Hoje", icon: "calendar" }] },
+  { label: "Vender", tabs: [
+    { to: "/admin/atendimento", label: "Atendimento", icon: "chat", badge: "attention" },
+    { to: "/admin/pedidos", label: "Pedidos", icon: "receipt" },
+  ] },
+  { label: "Operação", tabs: [
+    { to: "/admin/estoque", label: "Estoque", icon: "boxes" },
+    { to: "/admin/rotas", label: "Rotas", icon: "truck" },
+  ] },
+  { label: "Catálogo", tabs: [
+    { to: "/admin/produtos", label: "Produtos", icon: "layers" },
+    { to: "/admin/robo", label: "Robô", icon: "sparkle" },
+  ] },
+  { label: "Gestão", tabs: [
+    { to: "/admin/dashboard", label: "Dashboard", icon: "trending" },
+    { to: "/admin/solicitacoes", label: "Solicitações", icon: "mail", badge: "requests" },
+    { to: "/admin/simulador", label: "Simulador", icon: "phone" },
+  ] },
 ];
 
 const SECTION_TITLE: [string, string][] = [
+  ["/admin/hoje", "Hoje"], ["/admin/pedidos", "Pedidos"],
   ["/admin/estoque", "Estoque"], ["/admin/produtos", "Produtos"], ["/admin/rotas", "Rotas"], ["/admin/dashboard", "Dashboard"],
-  ["/admin/atendimento", "Atendimento"], ["/admin/solicitacoes", "Solicitações"], ["/admin/simulador", "Simulador"],
+  ["/admin/atendimento", "Atendimento"], ["/admin/solicitacoes", "Solicitações"], ["/admin/robo", "Central do Robô"], ["/admin/simulador", "Simulador"],
 ];
+
+// "/admin" abre o Hoje; links antigos de pedido ("/admin?q=PED-…") continuam abrindo Pedidos.
+const isOrders = (pathname: string, search: URLSearchParams) => pathname.startsWith("/admin/pedidos") || (pathname === "/admin" && search.has("q"));
+const isToday = (pathname: string, search: URLSearchParams) => pathname.startsWith("/admin/hoje") || (pathname === "/admin" && !search.has("q"));
 
 // Contadores das abas (fila do WhatsApp e solicitações do site), atualizados a cada 20 s.
 function useBadges(enabled: boolean) {
@@ -52,7 +71,9 @@ function useBadges(enabled: boolean) {
   return badges;
 }
 
-function Section({ pathname }: { pathname: string }) {
+function Section({ pathname, search }: { pathname: string; search: URLSearchParams }) {
+  if (isToday(pathname, search)) return <TodayPage />;
+  if (isOrders(pathname, search)) return <OrdersPage />;
   if (pathname === "/admin/produtos/novo") return <ProductForm id={null} />;
   const edit = matchPath("/admin/produtos/:id", pathname);
   if (edit) return <ProductForm key={edit.id} id={Number(edit.id)} />;
@@ -63,11 +84,12 @@ function Section({ pathname }: { pathname: string }) {
   if (pathname.startsWith("/admin/atendimento")) return <AttendancePage />;
   if (pathname.startsWith("/admin/solicitacoes")) return <RequestsPage />;
   if (pathname.startsWith("/admin/simulador")) return <SimulatorPage />;
-  return <OrdersPage />;
+  if (pathname.startsWith("/admin/robo")) return <BotPage />;
+  return <TodayPage />;
 }
 
 export function AdminApp() {
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const { user, ready, logout } = useStore();
   // Enquanto o acesso não estiver configurado, o backend pode liberar o painel (ADMIN_AUTH_DISABLED).
   const access = useApi<{ open: boolean }>("/admin/access");
@@ -76,9 +98,9 @@ export function AdminApp() {
 
   useEffect(() => {
     if (pathname.startsWith("/admin/produtos/")) return; // o formulário define o próprio título
-    const section = SECTION_TITLE.find(([p]) => pathname.startsWith(p))?.[1] ?? "Pedidos";
+    const section = isOrders(pathname, search) ? "Pedidos" : SECTION_TITLE.find(([p]) => pathname.startsWith(p))?.[1] ?? "Hoje";
     document.title = `${section} · Painel Encantos`;
-  }, [pathname]);
+  }, [pathname, search]);
 
   if (!ready || access.loading) return <div className="adm-loading"><Icon name="loader" className="icon spin" /></div>;
 
@@ -105,15 +127,22 @@ export function AdminApp() {
             <span>Encantos <small>Painel</small></span>
           </Link>
           <nav className="adm-tabs" aria-label="Seções do painel">
-            {TABS.map((t) => {
-              const active = t.to === "/admin" ? pathname === "/admin" : pathname.startsWith(t.to);
-              return (
-                <Link key={t.to} to={t.to} className="adm-tab" aria-current={active ? "page" : undefined} title={t.label}>
-                  <Icon name={t.icon} className="icon-sm" /><span className="adm-tab-label">{t.label}</span>
-                  {t.badge && badges[t.badge] > 0 && <span className="adm-count adm-tab-badge" aria-label={`${badges[t.badge]} pendentes`}>{badges[t.badge]}</span>}
-                </Link>
-              );
-            })}
+            {GROUPS.map((g) => (
+              <div key={g.label ?? "hoje"} className="adm-tab-group" role="group" aria-label={g.label ?? "Hoje"}>
+                {g.label && <span className="adm-tab-group-label" aria-hidden="true">{g.label}</span>}
+                <div className="adm-tab-group-items">
+                  {g.tabs.map((t) => {
+                    const active = t.to === "/admin/hoje" ? isToday(pathname, search) : t.to === "/admin/pedidos" ? isOrders(pathname, search) : pathname.startsWith(t.to);
+                    return (
+                      <Link key={t.to} to={t.to} className="adm-tab" aria-current={active ? "page" : undefined} title={t.label}>
+                        <Icon name={t.icon} className="icon-sm" /><span className="adm-tab-label">{t.label}</span>
+                        {t.badge && badges[t.badge] > 0 && <span className="adm-count adm-tab-badge" aria-label={`${badges[t.badge]} pendentes`}>{badges[t.badge]}</span>}
+                      </Link>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
           </nav>
           <div className="adm-user">
             <Link to="/" className="adm-link"><Icon name="store" className="icon-sm" /><span>Ver loja</span></Link>
@@ -128,7 +157,7 @@ export function AdminApp() {
         </div>
       </header>
       <main className="adm-wrap adm-main">
-        <Section pathname={pathname} />
+        <Section pathname={pathname} search={search} />
       </main>
     </div>
   );

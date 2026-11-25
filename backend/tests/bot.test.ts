@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseCityState, parseQuantity, pickOption, runBot, skuFromSiteMessage, type BotData, type BotDeps, type BotProduct } from "../src/lib/bot";
+import { parseCityState, parseQuantity, pickOption, runBot, siteCartFromMessage, skuFromSiteMessage, type BotData, type BotDeps, type BotProduct } from "../src/lib/bot";
 
 const PRODUCTS: BotProduct[] = [
   { id: 1, sku: "CAN-MC600", name: "Queijo Canastra Meia-Cura", unitLabel: "peça", weightGrams: 600, priceCents: 6890, availableUnits: 10 },
@@ -133,5 +133,62 @@ describe("transferência para o responsável", () => {
   test("depois de 3 respostas sem sentido, chama um atendente", async () => {
     const r = await chat(["oi", "banana", "banana", "banana"]);
     expect(r.last.handoff).toBeDefined();
+  });
+});
+
+// Mensagem que o botão "Finalizar pelo WhatsApp" do carrinho do site monta.
+const SITE_CART = "Olá! Quero finalizar meu pedido do site:\n• 2× Queijo Canastra Meia-Cura (cód. CAN-MC600)\n• 1× Queijo Tulha 180 dias (cód. TUL-180)\nSubtotal no site: R$ 286,80";
+
+describe("carrinho do site", () => {
+  test("lê todas as linhas, quantidades, caixas e CEP", () => {
+    expect(siteCartFromMessage(SITE_CART)).toEqual({
+      lines: [{ sku: "CAN-MC600", quantity: 2, box: false }, { sku: "TUL-180", quantity: 1, box: false }],
+      cep: undefined,
+    });
+    expect(siteCartFromMessage("Olá! Quero finalizar meu pedido do site:\n• 3 cx Queijo Canastra (cód. can-mc600)\nCEP: 30130-000")).toEqual({
+      lines: [{ sku: "CAN-MC600", quantity: 3, box: true }],
+      cep: "30130000",
+    });
+    // Mensagem de um produto só (botão "Pedir só este") não é carrinho.
+    expect(siteCartFromMessage("Olá! Quero pedir 2 peças de Queijo Canastra (cód. CAN-MC600)")).toBeUndefined();
+  });
+
+  test("monta o carrinho, avisa o que esgotou e pede o CEP", async () => {
+    const r = await chat([SITE_CART]);
+    expect(r.state).toBe("checkout_cep");
+    expect(r.data.cart).toEqual([expect.objectContaining({ productId: 1, quantity: 2, priceCents: 6890 })]);
+    expect(r.replies[0]).toContain("Olá, Mariana");
+    expect(r.replies.some((b) => b.includes("Recebi seu carrinho") && b.includes("Tulha 180 dias* esgotou"))).toBe(true);
+  });
+
+  test("com CEP na mensagem, pula direto para o endereço e fecha o pedido", async () => {
+    const msg = "Olá! Quero finalizar meu pedido do site:\n• 2× Queijo Canastra Meia-Cura (cód. CAN-MC600)\nCEP: 30130-000";
+    const r = await chat([msg, "Rua das Flores, 120", "Centro", "Belo Horizonte/MG", "não", "1"]);
+    expect(r.last.orderCode).toBe("PED-2026-000099");
+    expect(r.deps.placed[0]).toMatchObject({ cart: [{ productId: 1, quantity: 2 }], cep: "30130-000" });
+  });
+
+  test("quantidade acima do estoque é ajustada", async () => {
+    const r = await chat(["Olá! Quero finalizar meu pedido do site:\n• 15× Queijo Canastra Meia-Cura (cód. CAN-MC600)"]);
+    expect(r.data.cart?.[0]?.quantity).toBe(10);
+    expect(r.replies.some((b) => b.includes("temos só 10"))).toBe(true);
+  });
+
+  test("chega no meio de outra conversa e substitui o carrinho", async () => {
+    const r = await chat(["oi", "1", SITE_CART]);
+    expect(r.state).toBe("checkout_cep");
+    expect(r.replies.filter((b) => b.includes("Olá, Mariana"))).toHaveLength(1);
+  });
+
+  test("carrinho com caixas vai para o comercial (atacado)", async () => {
+    const r = await chat(["Olá! Quero finalizar meu pedido do site:\n• 3 cx Queijo Canastra (cód. CAN-MC600)"]);
+    expect(r.last.handoff).toMatchObject({ topic: "atacado" });
+    expect(r.last.handoff?.reason).toContain("3 cx CAN-MC600");
+  });
+
+  test("nada disponível: oferece outras opções", async () => {
+    const r = await chat(["Olá! Quero finalizar meu pedido do site:\n• 1× Queijo Tulha 180 dias (cód. TUL-180)"]);
+    expect(r.state).toBe("categories");
+    expect(r.data.cart).toEqual([]);
   });
 });

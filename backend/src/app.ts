@@ -17,6 +17,8 @@ import { deliveryRoutes } from "./routes/delivery";
 import { homeRoutes } from "./routes/home";
 import { meRoutes } from "./routes/me";
 import { orderRoutes } from "./routes/orders";
+import { paymentAdminRoutes, paymentWebhookRoutes } from "./routes/payments";
+import { botCentralRoutes } from "./routes/botCentral";
 import { proposalRoutes } from "./routes/proposals";
 import { wholesaleRoutes } from "./routes/wholesale";
 import { docsPage } from "./docs";
@@ -35,6 +37,9 @@ export function createApp() {
     .route("/supplier-proposals", proposalRoutes)
     .route("/contact", contactRoutes)
     .route("/whatsapp", whatsappPublicRoutes)
+    .route("/payments", paymentWebhookRoutes)
+    .route("/admin/pagamentos", paymentAdminRoutes)
+    .route("/admin/robo", botCentralRoutes)
     .route("/admin/atendimento", attendanceRoutes)
     .route("/admin", adminRoutes);
 
